@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node.js and local code-graph state
+node_modules/
+.codegraph/
+.npmrc.local

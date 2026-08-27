@@ -1,0 +1,28 @@
+{
+  "name": "kuzu-codegraph-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "verify:kuzu": "tsx src/verify-kuzu.ts",
+    "build": "tsc --noEmit",
+    "seed": "tsx src/seed.ts",
+    "explorer": "docker run --rm -p 8000:8000 -v \"$PWD/.codegraph/kuzu:/database/database.kz\" kuzudb/explorer:latest",
+    "mcp": "tsx src/mcp-server.ts",
+    "test:seed": "tsx test/seed-smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "kuzu": "0.11.3",
+    "ts-morph": "^27.0.2",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

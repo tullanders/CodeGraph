@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "kuzu-codegraph": {
+      "type": "stdio",
+      "command": "npm",
+      "args": ["run", "mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
