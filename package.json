@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "codegraph": "bin/codegraph.cjs"
+  },
   "engines": {
     "node": ">=20"
   },

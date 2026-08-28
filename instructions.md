@@ -25,6 +25,11 @@ Databasen lagras i `.codegraph/kuzu` och ska ligga i `.gitignore`.
 - TypeScript- och TSX-filer som ingar i det angivna `tsconfig.json`.
 - En `File`-nod per absolut filvag.
 - En `IMPORTS`-relation for varje lokal import som `ts-morph` kan upplosa till en kallfil.
+- En `Type`-nod per klass- eller interfacedeklaration, identifierad med `filvag:namn`.
+- En `DECLARES`-relation fran filen till varje `Type` den deklarerar.
+- En `Function`-nod per fristaende funktion (`filvag:namn`) eller klassmetod (`filvag:klassnamn.metodnamn`).
+- En `HAS_FUNCTION`-relation fran filen till varje fristaende funktion, och en `HAS_METHOD`-relation fran `Type` till varje metod.
+- En `CALLS`-relation for varje metodanrop som `ts-morph` kan upplosa till en kand funktions- eller metoddeklaration.
 - Tva MCP-verktyg:
   - `get_file_dependencies`: filer som en given fil importerar.
   - `get_file_importers`: filer som importerar en given fil.
@@ -32,13 +37,14 @@ Databasen lagras i `.codegraph/kuzu` och ska ligga i `.gitignore`.
 
 ### Ing ar inte
 
-- Klasser, interfaces, metodanrop, referenser eller typberoenden.
+- Referenser eller typberoenden (till exempel `extends`/`implements`).
+- Anrop till fristaende funktioner som endast finns som konstanter/arrow-funktioner, samt anrop utanfor en funktions- eller metodkropp.
 - Externa npm-paket och oresolverade alias.
 - Inkremetell uppdatering, file watcher eller VS Code-extension.
 - Ett generellt Cypher-verktyg. Agenten ska inte kunna modifiera databasen genom MCP.
 - Stod for flera `tsconfig.json` i samma korning.
 
-Utvidga till symboler forst nar filberoenden har visat sig anvandbara i praktiken. En framtida symbolnod ska identifieras med `filvag + symbolnamn`, aldrig endast namn.
+Utvidga till referenser och typberoenden forst nar `Function`-noderna och `CALLS`-relationen har visat sig anvandbara i praktiken. En framtida symbolnod ska identifieras med `filvag + symbolnamn`, aldrig endast namn.
 
 ## Teknikval
 
@@ -101,9 +107,39 @@ CREATE NODE TABLE IF NOT EXISTS File(
 CREATE REL TABLE IF NOT EXISTS IMPORTS(
   FROM File TO File
 );
+
+CREATE NODE TABLE IF NOT EXISTS Type(
+  path STRING,
+  name STRING,
+  kind STRING,
+  PRIMARY KEY (path)
+);
+
+CREATE REL TABLE IF NOT EXISTS DECLARES(
+  FROM File TO Type
+);
+
+CREATE NODE TABLE IF NOT EXISTS Function(
+  path STRING,
+  name STRING,
+  kind STRING,
+  PRIMARY KEY (path)
+);
+
+CREATE REL TABLE IF NOT EXISTS HAS_FUNCTION(
+  FROM File TO Function
+);
+
+CREATE REL TABLE IF NOT EXISTS HAS_METHOD(
+  FROM Type TO Function
+);
+
+CREATE REL TABLE IF NOT EXISTS CALLS(
+  FROM Function TO Function
+);
 ```
 
-`path` ska vara den normaliserade absoluta sokvagen fran `sourceFile.getFilePath()`. Det ar den enda identiteten i PoC:en.
+`path` ska vara den normaliserade absoluta sokvagen fran `sourceFile.getFilePath()`. Det ar den enda identiteten i PoC:en for filer. En `Type`-nods `path` ar `filvag:namn`, och `kind` ar `"class"` eller `"interface"`. En `Function`-nods `path` ar `filvag:namn` for fristaende funktioner eller `filvag:klassnamn.metodnamn` for metoder, och `kind` ar `"function"` eller `"method"`.
 
 ## Seedning
 

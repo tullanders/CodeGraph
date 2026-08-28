@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/anders/GitHub/CodeGraph/node_modules/tsx/dist/cli.mjs",
+        "/Users/anders/GitHub/CodeGraph/src/mcp-server.ts"
+      ],
+      "cwd": "/Users/anders/GitHub/CodeGraph"
+    }
+  }
+}
