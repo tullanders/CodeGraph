@@ -90,17 +90,17 @@ export async function seedCodebase(
     `);
     const insertType = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (type:Type {path: $typePath, name: $name, kind: $kind})
+      MERGE (type:Type {path: $typePath, name: $name, kind: $kind, line: $line, endLine: $endLine})
       MERGE (file)-[:DECLARES]->(type)
     `);
     const insertFunction = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine})
       MERGE (file)-[:HAS_FUNCTION]->(fn)
     `);
     const insertMethod = await connection.prepare(`
       MATCH (type:Type {path: $typePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine})
       MERGE (type)-[:HAS_METHOD]->(fn)
     `);
     const insertCall = await connection.prepare(`
@@ -181,11 +181,12 @@ export async function seedCodebase(
     for (const sourceFile of sourceFiles) {
       const filePath = sourceFile.getFilePath();
       const declarations = [
-        ...sourceFile.getClasses().map((declaration) => ({ name: declaration.getName(), kind: "class" })),
-        ...sourceFile.getInterfaces().map((declaration) => ({ name: declaration.getName(), kind: "interface" })),
+        ...sourceFile.getClasses().map((declaration) => ({ declaration, name: declaration.getName(), kind: "class" })),
+        ...sourceFile.getInterfaces().map((declaration) => ({ declaration, name: declaration.getName(), kind: "interface" })),
+        ...sourceFile.getTypeAliases().map((declaration) => ({ declaration, name: declaration.getName(), kind: "typeAlias" })),
       ];
 
-      for (const { name, kind } of declarations) {
+      for (const { declaration, name, kind } of declarations) {
         if (!name) {
           continue;
         }
@@ -195,6 +196,8 @@ export async function seedCodebase(
           typePath: `${filePath}:${name}`,
           name,
           kind,
+          line: declaration.getStartLineNumber(),
+          endLine: declaration.getEndLineNumber(),
         }));
         await result.close();
         types += 1;
@@ -221,6 +224,8 @@ export async function seedCodebase(
           fnPath,
           name,
           kind: "function",
+          line: declaration.getStartLineNumber(),
+          endLine: declaration.getEndLineNumber(),
         }));
         await result.close();
         functionPathByDeclaration.set(declaration, fnPath);
@@ -244,6 +249,8 @@ export async function seedCodebase(
             fnPath,
             name,
             kind: "method",
+            line: method.getStartLineNumber(),
+            endLine: method.getEndLineNumber(),
           }));
           await result.close();
           functionPathByDeclaration.set(method, fnPath);

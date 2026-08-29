@@ -5,3 +5,7 @@ export interface Formatter {
 export function formatMessage(value: string) {
   return `Application ${value}`;
 }
+
+export type FormatterOptions = {
+  uppercase: boolean;
+};
