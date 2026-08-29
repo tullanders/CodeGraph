@@ -15,7 +15,8 @@
     "seed": "tsx src/seed.ts",
     "explorer": "docker run --rm -p 8000:8000 -v \"$PWD/.codegraph/kuzu:/database/database.kz\" kuzudb/explorer:latest",
     "mcp": "tsx src/mcp-server.ts",
-    "test:seed": "tsx test/seed-smoke.ts"
+    "test:seed": "tsx test/seed-smoke.ts",
+    "test:paths": "tsx test/paths-smoke.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",

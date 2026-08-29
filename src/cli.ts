@@ -1,11 +1,17 @@
 import { access, appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { findGraphDatabase, graphDatabasePathFor } from "./paths.js";
 import { seedCodebase } from "./seed.js";
 
 const projectRoot = process.cwd();
 const tsconfigPath = path.join(projectRoot, "tsconfig.json");
-const databasePath = path.join(projectRoot, ".codegraph", "kuzu");
+// init skapar alltid grafen i den katalog kommandot körs från — det är den
+// explicita installationsgesten. seed återanvänder en befintlig graf var den
+// än ligger uppåt, så att seedning från en underkatalog i ett monorepo inte
+// skapar en andra, konkurrerande graf.
+const initDatabasePath = graphDatabasePathFor(projectRoot);
+const seedDatabasePath = findGraphDatabase(projectRoot) ?? initDatabasePath;
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const mcpServerPath = path.join(packageRoot, "src", "mcp-server.ts");
 const tsxPath = path.join(packageRoot, "node_modules", "tsx", "dist", "cli.mjs");
@@ -61,19 +67,20 @@ async function ensureMcpConfiguration() {
   console.log(`Konfigurerade CodeGraph i ${mcpConfigPath}`);
 }
 
-async function seed() {
+async function seed(databasePath: string) {
   await requireTsconfig();
   const summary = await seedCodebase(tsconfigPath, databasePath);
   console.log(
     `Seeded ${summary.files} files, ${summary.types} types, ${summary.functions} functions, and ${summary.imports} imports (${summary.unresolvedImports} unresolved imports). ${summary.calls} calls resolved (${summary.unresolvedCalls} unresolved calls). ${summary.mocks} mocks resolved (${summary.unresolvedMocks} unresolved mocks).`,
   );
+  console.log(`Grafen ligger i ${databasePath}`);
 }
 
 async function init() {
   await requireTsconfig();
   await ensureGitignore();
   await ensureMcpConfiguration();
-  await seed();
+  await seed(initDatabasePath);
   console.log(`CodeGraph ar installerat i ${projectRoot}.`);
 }
 
@@ -86,7 +93,7 @@ async function main() {
   }
 
   if (command === "seed") {
-    await seed();
+    await seed(seedDatabasePath);
     return;
   }
 

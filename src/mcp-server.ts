@@ -1,22 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Connection, Database } from "kuzu";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import { z } from "zod";
+import { findGraphDatabase, searchedDirectories } from "./paths.js";
 import { openGraphDatabase, singleResult } from "./schema.js";
 
 const pathQueryShape = { pathQuery: z.string().min(1) };
 
 function getDatabasePath() {
-  const projectRoot = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
-  return path.resolve(projectRoot, ".codegraph/kuzu");
-}
+  const databasePath = findGraphDatabase(process.cwd());
 
-function requireDatabase(databasePath: string) {
-  if (!existsSync(databasePath)) {
-    throw new Error("Ingen graf hittades. Kor 'npm run seed' forst.");
+  if (!databasePath) {
+    const searched = searchedDirectories(process.cwd())
+      .map((directory) => `- ${directory}`)
+      .join("\n");
+    throw new Error(
+      `Ingen graf hittades. Sökte efter .codegraph/kuzu i:\n${searched}\nKör 'codegraph init' i projektets rot.`,
+    );
   }
+
+  return databasePath;
 }
 
 async function findMatchingFiles(connection: Connection, pathQuery: string): Promise<string[]> {
@@ -77,7 +80,6 @@ async function resolveFileQuery(
 }
 
 async function withConnection<T>(databasePath: string, run: (connection: Connection) => Promise<T>): Promise<T> {
-  requireDatabase(databasePath);
   const { database, connection } = openGraphDatabase(databasePath);
 
   try {
