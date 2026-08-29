@@ -77,14 +77,13 @@ claude mcp list
 claude mcp get codegraph
 ```
 
-Servern exponerar fyra skrivskyddade verktyg:
+Servern exponerar tre skrivskyddade verktyg:
 
-- `get_file_dependencies`: filer som en given fil importerar direkt.
-- `get_file_importers`: filer som direkt importerar en given fil.
-- `get_file_mocks`: moduler som en given fil mockar (`vi.mock`/`jest.mock`).
-- `get_file_mocked_by`: filer som mockar en given fil (`vi.mock`/`jest.mock`).
+- `graph_status`: när grafen seedades, mot vilken commit, vilka tsconfig som ingick, och hur många TypeScript-filer som ändrats sedan dess. Anropa detta innan du litar på ett radintervall.
+- `find_symbol`: hittar filer, typer och funktioner på namn eller sökvägsdel, och returnerar radintervall.
+- `neighbors`: expanderar noder längs `IMPORTS`, `MOCKS`, `CALLS`, `DECLARES`, `HAS_FUNCTION` eller `HAS_METHOD`, i valfri riktning och till djup 1–3.
 
-Alla fyra tar `{ "pathQuery": "del/av/sokvag" }` och returnerar kandidater i stallet for ett godtyckligt val om flera filer matchar.
+Varje `neighbors`-svar bär `unresolved`-räknare. En tom nodlista med `unresolved > 0` betyder att grafen inte kunde upplösa relationen — inte att den saknas.
 
 ## Forutsattningar
 
