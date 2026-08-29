@@ -1,6 +1,7 @@
 import { access, appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readTsconfigPaths, writeTsconfigPaths } from "./config.js";
 import { findGraphDatabase, graphDatabasePathFor } from "./paths.js";
 import { seedCodebase } from "./seed.js";
 
@@ -16,12 +17,35 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const mcpServerPath = path.join(packageRoot, "src", "mcp-server.ts");
 const tsxPath = path.join(packageRoot, "node_modules", "tsx", "dist", "cli.mjs");
 
-async function requireTsconfig() {
-  try {
-    await access(tsconfigPath);
-  } catch {
-    throw new Error(`Hittar ingen tsconfig.json i ${projectRoot}. Kör kommandot från projektets rot.`);
+async function requireTsconfigs(tsconfigPaths: string[]) {
+  for (const tsconfigPath of tsconfigPaths) {
+    try {
+      await access(tsconfigPath);
+    } catch {
+      throw new Error(`Hittar ingen tsconfig.json på ${tsconfigPath}.`);
+    }
   }
+}
+
+// --tsconfig can be repeated: codegraph init --tsconfig tsconfig.json --tsconfig packages/pdf/tsconfig.json
+function parseTsconfigFlags(argumentsList: string[]): string[] {
+  const paths: string[] = [];
+
+  for (let index = 0; index < argumentsList.length; index += 1) {
+    if (argumentsList[index] !== "--tsconfig") {
+      continue;
+    }
+
+    const value = argumentsList[index + 1];
+
+    if (!value) {
+      throw new Error("--tsconfig kräver en sökväg.");
+    }
+
+    paths.push(path.resolve(projectRoot, value));
+  }
+
+  return paths;
 }
 
 async function ensureGitignore() {
@@ -67,37 +91,41 @@ async function ensureMcpConfiguration() {
   console.log(`Konfigurerade CodeGraph i ${mcpConfigPath}`);
 }
 
-async function seed(databasePath: string) {
-  await requireTsconfig();
-  const summary = await seedCodebase(tsconfigPath, databasePath);
+async function seed(databasePath: string, tsconfigPaths: string[]) {
+  await requireTsconfigs(tsconfigPaths);
+  const summary = await seedCodebase(tsconfigPaths, databasePath);
   console.log(
     `Seeded ${summary.files} files, ${summary.types} types, ${summary.functions} functions, and ${summary.imports} imports (${summary.unresolvedImports} unresolved imports). ${summary.calls} calls resolved (${summary.unresolvedCalls} unresolved calls). ${summary.mocks} mocks resolved (${summary.unresolvedMocks} unresolved mocks).`,
   );
   console.log(`Grafen ligger i ${databasePath}`);
 }
 
-async function init() {
-  await requireTsconfig();
+async function init(tsconfigPaths: string[]) {
+  const resolved = tsconfigPaths.length > 0 ? tsconfigPaths : [tsconfigPath];
+  await requireTsconfigs(resolved);
   await ensureGitignore();
   await ensureMcpConfiguration();
-  await seed(initDatabasePath);
+  await writeTsconfigPaths(projectRoot, resolved);
+  await seed(initDatabasePath, resolved);
   console.log(`CodeGraph ar installerat i ${projectRoot}.`);
 }
 
 async function main() {
   const command = process.argv[2];
+  const flagged = parseTsconfigFlags(process.argv.slice(3));
 
   if (command === "init") {
-    await init();
+    await init(flagged);
     return;
   }
 
   if (command === "seed") {
-    await seed(seedDatabasePath);
+    const tsconfigPaths = flagged.length > 0 ? flagged : await readTsconfigPaths(projectRoot);
+    await seed(seedDatabasePath, tsconfigPaths);
     return;
   }
 
-  throw new Error("Använd: codegraph init eller codegraph seed");
+  throw new Error("Använd: codegraph init [--tsconfig <sökväg>]... eller codegraph seed [--tsconfig <sökväg>]...");
 }
 
 main().catch((error: unknown) => {

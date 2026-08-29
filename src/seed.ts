@@ -1,12 +1,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { FunctionDeclaration, MethodDeclaration, Project, SyntaxKind, ts } from "ts-morph";
-import {
-  closeGraphDatabase,
-  createGraphDatabase,
-  DEFAULT_DATABASE_PATH,
-  singleResult,
-} from "./schema.js";
+import { FunctionDeclaration, MethodDeclaration, Project, SourceFile, SyntaxKind, ts } from "ts-morph";
+import { closeGraphDatabase, createGraphDatabase, singleResult } from "./schema.js";
 
 export interface SeedSummary {
   files: number;
@@ -24,19 +19,60 @@ const MOCK_FUNCTION_NAMES = new Set(["mock", "doMock"]);
 const MOCK_OBJECT_NAMES = new Set(["vi", "jest"]);
 
 export async function seedCodebase(
-  tsconfigPath: string,
-  databasePath?: string,
+  tsconfigPaths: string[],
+  databasePath: string,
 ): Promise<SeedSummary> {
-  const resolvedTsconfigPath = path.resolve(tsconfigPath);
-  const resolvedDatabasePath = path.resolve(
-    databasePath ?? path.join(path.dirname(resolvedTsconfigPath), ".codegraph/kuzu"),
-  );
-  const project = new Project({ tsConfigFilePath: resolvedTsconfigPath });
-  const projectRoot = path.dirname(resolvedTsconfigPath);
-  const sourceFiles = project
-    .getSourceFiles()
-    .filter((sourceFile) => !isInHiddenRootDirectory(sourceFile.getFilePath(), projectRoot));
-  const projectFilePaths = new Set(sourceFiles.map((sourceFile) => sourceFile.getFilePath()));
+  if (tsconfigPaths.length === 0) {
+    throw new Error("Minst en tsconfig.json måste anges.");
+  }
+
+  const resolvedDatabasePath = path.resolve(databasePath);
+  const projects = tsconfigPaths.map((tsconfigPath) => {
+    const resolvedTsconfigPath = path.resolve(tsconfigPath);
+    return {
+      project: new Project({ tsConfigFilePath: resolvedTsconfigPath }),
+      projectRoot: path.dirname(resolvedTsconfigPath),
+    };
+  });
+
+  // A file can be part of several projects. Deduplicate by path so that
+  // every file is visited exactly once, otherwise its imports and functions
+  // would be double-counted.
+  const sourceFileByPath = new Map<string, SourceFile>();
+
+  for (const { project, projectRoot } of projects) {
+    for (const sourceFile of project.getSourceFiles()) {
+      const filePath = sourceFile.getFilePath();
+
+      if (isInHiddenRootDirectory(filePath, projectRoot)) {
+        continue;
+      }
+
+      if (!sourceFileByPath.has(filePath)) {
+        sourceFileByPath.set(filePath, sourceFile);
+      }
+    }
+  }
+
+  const sourceFiles = [...sourceFileByPath.values()];
+  // The union across all projects. Resolving imports against this set — and
+  // not against one project at a time — is the whole point: it's how an
+  // import from apps/web to packages/core becomes an edge instead of an
+  // unresolved counter.
+  const projectFilePaths = new Set(sourceFileByPath.keys());
+
+  // Each file must be resolved with its own project's compiler options.
+  const projectByFilePath = new Map<string, (typeof projects)[number]["project"]>();
+
+  for (const { project } of projects) {
+    for (const sourceFile of project.getSourceFiles()) {
+      const filePath = sourceFile.getFilePath();
+
+      if (!projectByFilePath.has(filePath)) {
+        projectByFilePath.set(filePath, project);
+      }
+    }
+  }
 
   await rm(resolvedDatabasePath, { force: true, recursive: true });
 
@@ -100,8 +136,6 @@ export async function seedCodebase(
 
     let mocks = 0;
     let unresolvedMocks = 0;
-    const compilerOptions = project.getCompilerOptions();
-    const moduleResolutionHost = project.getModuleResolutionHost();
 
     for (const sourceFile of sourceFiles) {
       for (const callExpression of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -111,14 +145,21 @@ export async function seedCodebase(
           continue;
         }
 
+        const owningProject = projectByFilePath.get(sourceFile.getFilePath());
+
+        if (!owningProject) {
+          unresolvedMocks += 1;
+          continue;
+        }
+
         const resolution = ts.resolveModuleName(
           moduleSpecifier,
           sourceFile.getFilePath(),
-          compilerOptions,
-          moduleResolutionHost,
+          owningProject.getCompilerOptions(),
+          owningProject.getModuleResolutionHost(),
         );
         const resolvedPath = resolution.resolvedModule
-          ? project.getSourceFile(resolution.resolvedModule.resolvedFileName)?.getFilePath()
+          ? owningProject.getSourceFile(resolution.resolvedModule.resolvedFileName)?.getFilePath()
           : undefined;
 
         if (!resolvedPath || !projectFilePaths.has(resolvedPath)) {
@@ -287,30 +328,4 @@ function isInHiddenRootDirectory(filePath: string, projectRoot: string) {
   const [rootDirectory] = path.relative(projectRoot, filePath).split(path.sep);
 
   return rootDirectory.startsWith(".");
-}
-
-function getTsconfigPath(argumentsList: string[]) {
-  const optionIndex = argumentsList.indexOf("--tsconfig");
-
-  if (optionIndex === -1 || !argumentsList[optionIndex + 1]) {
-    throw new Error("Missing --tsconfig <path>.");
-  }
-
-  return argumentsList[optionIndex + 1];
-}
-
-async function main() {
-  const tsconfigPath = getTsconfigPath(process.argv.slice(2));
-  const summary = await seedCodebase(tsconfigPath);
-
-  console.log(
-    `Seeded ${summary.files} files, ${summary.types} types, ${summary.functions} functions, and ${summary.imports} imports (${summary.unresolvedImports} unresolved imports). ${summary.calls} calls resolved (${summary.unresolvedCalls} unresolved calls). ${summary.mocks} mocks resolved (${summary.unresolvedMocks} unresolved mocks).`,
-  );
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
-  main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  });
 }

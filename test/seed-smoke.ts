@@ -13,7 +13,7 @@ await mkdir(path.join(fixtureDirectory, ".generated"), { recursive: true });
 await writeFile(path.join(fixtureDirectory, ".generated", "ignored.ts"), "export const ignored = true;\n");
 
 try {
-  const summary = await seedCodebase(path.join(fixtureDirectory, "tsconfig.json"), databasePath);
+  const summary = await seedCodebase([path.join(fixtureDirectory, "tsconfig.json")], databasePath);
 
   assert.deepEqual(summary, {
     files: 3,
