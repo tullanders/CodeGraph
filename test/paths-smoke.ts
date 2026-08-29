@@ -9,27 +9,27 @@ const nested = path.join(root, "apps", "app", "src");
 await mkdir(nested, { recursive: true });
 
 try {
-  // Ingen graf någonstans i kedjan.
+  // No graph anywhere in the chain.
   assert.equal(findGraphDatabase(nested), undefined);
 
-  // Graf i repo-roten hittas från en djup underkatalog.
+  // A graph at the repo root is found from a deep subdirectory.
   await mkdir(path.join(root, ".codegraph"), { recursive: true });
   await writeFile(path.join(root, ".codegraph", "kuzu"), "");
   assert.equal(findGraphDatabase(nested), path.join(root, ".codegraph", "kuzu"));
 
-  // En närmare graf vinner över en i roten.
+  // A closer graph wins over one at the root.
   const appRoot = path.join(root, "apps", "app");
   await mkdir(path.join(appRoot, ".codegraph"), { recursive: true });
   await writeFile(path.join(appRoot, ".codegraph", "kuzu"), "");
   assert.equal(findGraphDatabase(nested), path.join(appRoot, ".codegraph", "kuzu"));
 
-  // graphDatabasePathFor räknar ut sökvägen utan att kräva att den finns.
+  // graphDatabasePathFor computes the path without requiring it to exist.
   assert.equal(
     graphDatabasePathFor(path.join(root, "packages", "pdf")),
     path.join(root, "packages", "pdf", ".codegraph", "kuzu"),
   );
 
-  // Felmeddelandet ska kunna räkna upp var det letades, rot inkluderad.
+  // The error message should be able to list where it searched, root included.
   const searched = searchedDirectories(nested);
   assert.ok(searched.includes(nested));
   assert.ok(searched.includes(root));

@@ -4,14 +4,14 @@ import path from "node:path";
 export const GRAPH_DIRECTORY = ".codegraph";
 export const GRAPH_FILE = "kuzu";
 
-// Sökvägen en graf SKULLE ha i den här katalogen. Kräver inte att den finns.
+// The path a graph WOULD have in this directory. Does not require it to exist.
 export function graphDatabasePathFor(directory: string): string {
   return path.join(path.resolve(directory), GRAPH_DIRECTORY, GRAPH_FILE);
 }
 
-// Letar uppåt efter en befintlig graf, som git letar efter .git. Närmast vinner.
-// Detta är den enda regeln för var grafen ligger — CLI, seeder och MCP-server
-// delar den, annars skriver den ena dit den andra inte läser.
+// Searches upward for an existing graph, like git searches for .git. Nearest wins.
+// This is the single rule for where the graph lives — CLI, seeder and MCP server
+// all share it, otherwise one writes where the other doesn't read.
 export function findGraphDatabase(startDirectory: string): string | undefined {
   for (const directory of searchedDirectories(startDirectory)) {
     const candidate = graphDatabasePathFor(directory);
@@ -24,7 +24,7 @@ export function findGraphDatabase(startDirectory: string): string | undefined {
   return undefined;
 }
 
-// Katalogkedjan från startDirectory upp till filsystemsroten, för felmeddelanden.
+// The chain of directories from startDirectory up to the filesystem root, for error messages.
 export function searchedDirectories(startDirectory: string): string[] {
   const directories: string[] = [];
   let directory = path.resolve(startDirectory);

@@ -6,10 +6,10 @@ import { seedCodebase } from "./seed.js";
 
 const projectRoot = process.cwd();
 const tsconfigPath = path.join(projectRoot, "tsconfig.json");
-// init skapar alltid grafen i den katalog kommandot körs från — det är den
-// explicita installationsgesten. seed återanvänder en befintlig graf var den
-// än ligger uppåt, så att seedning från en underkatalog i ett monorepo inte
-// skapar en andra, konkurrerande graf.
+// init always creates the graph in the directory the command is run from —
+// that's the explicit installation gesture. seed reuses an existing graph
+// wherever it lives upward, so seeding from a subdirectory in a monorepo
+// doesn't create a second, competing graph.
 const initDatabasePath = graphDatabasePathFor(projectRoot);
 const seedDatabasePath = findGraphDatabase(projectRoot) ?? initDatabasePath;
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
