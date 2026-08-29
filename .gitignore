@@ -219,5 +219,5 @@ __marimo__/
 
 # Node.js and local code-graph state
 node_modules/
-.codegraph/
+.codegraph/kuzu*
 .npmrc.local

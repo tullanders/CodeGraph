@@ -57,10 +57,10 @@ async function ensureGitignore() {
   } catch {
   }
 
-  if (!/(^|\n)\.codegraph\/(?:\n|$)/.test(contents)) {
+  if (!/(^|\n)\.codegraph\/kuzu\*(?:\n|$)/.test(contents)) {
     const separator = contents.length > 0 && !contents.endsWith("\n") ? "\n" : "";
-    await appendFile(gitignorePath, `${separator}.codegraph/\n`);
-    console.log(`La till .codegraph/ i ${gitignorePath}`);
+    await appendFile(gitignorePath, `${separator}.codegraph/kuzu*\n`);
+    console.log(`La till .codegraph/kuzu* i ${gitignorePath}`);
   }
 }
 
