@@ -55,6 +55,71 @@ try {
     });
     assert.deepEqual(mocks.nodes, []);
     assert.equal(mocks.unresolved[indexPath].unresolvedImports, 1);
+
+    // unresolvedCalls must be a real measurement, not a fabricated 0: the
+    // function-level count and the file-level rollup must agree, since
+    // unresolved.ts's only function is useHelper.
+    const unresolvedFilePath = path.join(fixtureDirectory, "src", "unresolved.ts");
+    const useHelperPath = `${unresolvedFilePath}:useHelper`;
+
+    const functionLevel = await queryNeighbors(connection, {
+      paths: [useHelperPath],
+      edges: ["CALLS"],
+      direction: "out",
+      depth: 1,
+    });
+    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedCalls, 1);
+    // A Function has no imports/mocks of its own: null, not a fabricated 0.
+    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedImports, null);
+    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedMocks, null);
+
+    const fileLevel = await queryNeighbors(connection, {
+      paths: [unresolvedFilePath],
+      edges: ["CALLS"],
+      direction: "out",
+      depth: 1,
+    });
+    assert.equal(fileLevel.unresolved[unresolvedFilePath].unresolvedCalls, 1);
+
+    // A path that backs no node at all is reported as unknown, never silently
+    // conflated with "found, no neighbours".
+    const missing = await queryNeighbors(connection, {
+      paths: ["/nope/does-not-exist.ts"],
+      edges: ["IMPORTS"],
+      direction: "out",
+      depth: 1,
+    });
+    assert.deepEqual(missing.nodes, []);
+    assert.deepEqual(missing.unresolved, {});
+    assert.deepEqual(missing.unknownPaths, ["/nope/does-not-exist.ts"]);
+
+    // The interpolation rule's entire defence is the Zod enum plus this runtime
+    // guard. Both a non-enum relation and a non-enum direction must be rejected,
+    // not silently coerced into a query.
+    await assert.rejects(() =>
+      queryNeighbors(connection, {
+        paths: [unresolvedFilePath],
+        edges: ["DROP TABLE File" as unknown as "CALLS"],
+        direction: "out",
+        depth: 1,
+      }),
+    );
+    await assert.rejects(() =>
+      queryNeighbors(connection, {
+        paths: [unresolvedFilePath],
+        edges: ["IMPORTS"],
+        direction: "sideways" as unknown as "out",
+        depth: 1,
+      }),
+    );
+    await assert.rejects(() =>
+      queryNeighbors(connection, {
+        paths: [unresolvedFilePath],
+        edges: ["IMPORTS"],
+        direction: "out",
+        depth: 2.5,
+      }),
+    );
   } finally {
     await closeGraphDatabase(database, connection);
   }
