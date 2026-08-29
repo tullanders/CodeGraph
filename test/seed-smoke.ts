@@ -94,6 +94,23 @@ try {
       { callerName: "start", calleeName: "formatMessage" },
       { callerName: "start", calleeName: "formatMessage" },
     ]);
+
+    const unresolvedResult = singleResult(await connection.query(`
+      MATCH (file:File)
+      RETURN file.fileName AS fileName,
+             file.unresolvedImports AS unresolvedImports,
+             file.unresolvedMocks AS unresolvedMocks
+      ORDER BY fileName
+    `));
+    const unresolvedRows = await unresolvedResult.getAll();
+    await unresolvedResult.close();
+
+    // index.ts imports node:path, which lies outside the project.
+    assert.deepEqual(unresolvedRows, [
+      { fileName: "app.ts", unresolvedImports: 0, unresolvedMocks: 0 },
+      { fileName: "format.ts", unresolvedImports: 0, unresolvedMocks: 0 },
+      { fileName: "index.ts", unresolvedImports: 1, unresolvedMocks: 0 },
+    ]);
   } finally {
     await closeGraphDatabase(database, connection);
   }

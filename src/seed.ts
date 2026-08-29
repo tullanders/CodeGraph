@@ -79,7 +79,9 @@ export async function seedCodebase(
   const { database, connection } = await createGraphDatabase(resolvedDatabasePath);
 
   try {
-    const insertFile = await connection.prepare("MERGE (file:File {path: $path, fileName: $fileName})");
+    const insertFile = await connection.prepare(
+      "MERGE (file:File {path: $path, fileName: $fileName, unresolvedImports: 0, unresolvedMocks: 0})",
+    );
     const insertImport = await connection.prepare(`
       MATCH (source:File {path: $sourcePath}), (target:File {path: $targetPath})
       MERGE (source)-[:IMPORTS]->(target)
@@ -95,23 +97,38 @@ export async function seedCodebase(
     `);
     const insertFunction = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
       MERGE (file)-[:HAS_FUNCTION]->(fn)
     `);
     const insertMethod = await connection.prepare(`
       MATCH (type:Type {path: $typePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
       MERGE (type)-[:HAS_METHOD]->(fn)
     `);
     const insertCall = await connection.prepare(`
       MATCH (caller:Function {path: $callerPath}), (callee:Function {path: $calleePath})
       MERGE (caller)-[:CALLS]->(callee)
     `);
+    const setFileUnresolved = await connection.prepare(`
+      MATCH (file:File {path: $path})
+      SET file.unresolvedImports = $unresolvedImports, file.unresolvedMocks = $unresolvedMocks
+    `);
+    const setFunctionUnresolved = await connection.prepare(`
+      MATCH (fn:Function {path: $path})
+      SET fn.unresolvedCalls = $unresolvedCalls
+    `);
 
     for (const sourceFile of sourceFiles) {
       const result = singleResult(await connection.execute(insertFile, { path: sourceFile.getFilePath(), fileName: sourceFile.getBaseName() }));
       await result.close();
     }
+
+    // Per node, not just in aggregate: the query layer must be able to say "this
+    // file has 2 unresolved imports" so a genuinely empty list can be told apart
+    // from one that could not be built.
+    const unresolvedImportsByFile = new Map<string, number>();
+    const unresolvedMocksByFile = new Map<string, number>();
+    const unresolvedCallsByFunction = new Map<string, number>();
 
     let imports = 0;
     let unresolvedImports = 0;
@@ -121,6 +138,8 @@ export async function seedCodebase(
         const targetFile = declaration.getModuleSpecifierSourceFile();
 
         if (!targetFile || !projectFilePaths.has(targetFile.getFilePath())) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedImportsByFile.set(filePath, (unresolvedImportsByFile.get(filePath) ?? 0) + 1);
           unresolvedImports += 1;
           continue;
         }
@@ -148,6 +167,8 @@ export async function seedCodebase(
         const owningProject = projectByFilePath.get(sourceFile.getFilePath());
 
         if (!owningProject) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedMocksByFile.set(filePath, (unresolvedMocksByFile.get(filePath) ?? 0) + 1);
           unresolvedMocks += 1;
           continue;
         }
@@ -163,6 +184,8 @@ export async function seedCodebase(
           : undefined;
 
         if (!resolvedPath || !projectFilePaths.has(resolvedPath)) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedMocksByFile.set(filePath, (unresolvedMocksByFile.get(filePath) ?? 0) + 1);
           unresolvedMocks += 1;
           continue;
         }
@@ -278,6 +301,7 @@ export async function seedCodebase(
         ) : undefined;
 
         if (!calleePath) {
+          unresolvedCallsByFunction.set(callerPath, (unresolvedCallsByFunction.get(callerPath) ?? 0) + 1);
           unresolvedCalls += 1;
           continue;
         }
@@ -286,6 +310,24 @@ export async function seedCodebase(
         await result.close();
         calls += 1;
       }
+    }
+
+    for (const sourceFile of sourceFiles) {
+      const filePath = sourceFile.getFilePath();
+      const result = singleResult(await connection.execute(setFileUnresolved, {
+        path: filePath,
+        unresolvedImports: unresolvedImportsByFile.get(filePath) ?? 0,
+        unresolvedMocks: unresolvedMocksByFile.get(filePath) ?? 0,
+      }));
+      await result.close();
+    }
+
+    for (const functionPath of functionPathByDeclaration.values()) {
+      const result = singleResult(await connection.execute(setFunctionUnresolved, {
+        path: functionPath,
+        unresolvedCalls: unresolvedCallsByFunction.get(functionPath) ?? 0,
+      }));
+      await result.close();
     }
 
     return {
