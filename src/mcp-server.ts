@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Connection, Database } from "kuzu";
+import path from "node:path";
 import { z } from "zod";
+import { describeFreshness } from "./graph-meta.js";
 import { findGraphDatabase, searchedDirectories } from "./paths.js";
 import { openGraphDatabase, singleResult } from "./schema.js";
 
@@ -142,6 +144,21 @@ server.registerTool(
     withConnection(getDatabasePath(), (connection) =>
       resolveFileQuery(connection, pathQuery, "MOCKS", "incoming", "mockedBy"),
     ),
+);
+
+server.registerTool(
+  "graph_status",
+  {
+    description:
+      "Returnerar grafens färskhet: när den seedades, mot vilken commit, vilka tsconfig som ingick, hur många TypeScript-filer som ändrats sedan dess, och var databasen ligger. Anropa detta innan du litar på ett radintervall från grafen.",
+    inputSchema: {},
+  },
+  async () =>
+    withConnection(getDatabasePath(), async (connection) => {
+      const databasePath = getDatabasePath();
+      const report = await describeFreshness(connection, databasePath, path.dirname(path.dirname(databasePath)));
+      return textResult(JSON.stringify(report, null, 2));
+    }),
 );
 
 async function main() {

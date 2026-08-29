@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { FunctionDeclaration, MethodDeclaration, Project, SourceFile, SyntaxKind, ts } from "ts-morph";
+import { currentCommit, writeGraphMeta } from "./graph-meta.js";
 import { closeGraphDatabase, createGraphDatabase, singleResult } from "./schema.js";
 
 export interface SeedSummary {
@@ -330,7 +331,7 @@ export async function seedCodebase(
       await result.close();
     }
 
-    return {
+    const summary: SeedSummary = {
       files: sourceFiles.length,
       imports,
       unresolvedImports,
@@ -341,6 +342,15 @@ export async function seedCodebase(
       calls,
       unresolvedCalls,
     };
+
+    await writeGraphMeta(connection, {
+      seededAt: new Date().toISOString(),
+      commit: await currentCommit(path.dirname(resolvedDatabasePath)),
+      tsconfigs: tsconfigPaths.map((entry) => path.resolve(entry)),
+      counts: summary,
+    });
+
+    return summary;
   } finally {
     await closeGraphDatabase(database, connection);
   }

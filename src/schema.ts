@@ -19,6 +19,7 @@ export async function createGraphDatabase(databasePath = DEFAULT_DATABASE_PATH) 
   await execute(connection, "CREATE REL TABLE HAS_FUNCTION(FROM File TO Function);");
   await execute(connection, "CREATE REL TABLE HAS_METHOD(FROM Type TO Function);");
   await execute(connection, "CREATE REL TABLE CALLS(FROM Function TO Function);");
+  await execute(connection, "CREATE NODE TABLE GraphMeta(key STRING, value STRING, PRIMARY KEY (key));");
 
   return { database, connection };
 }
