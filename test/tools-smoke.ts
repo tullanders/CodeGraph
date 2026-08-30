@@ -22,6 +22,19 @@ try {
     assert.equal(symbols[0].line, 5);
     assert.equal(symbols[0].endLine, 7);
 
+    // Matching is case-insensitive: an agent that searches "party" must still
+    // find createParty. Case-sensitive CONTAINS is the single most common
+    // cause of a false empty result, since callers rarely know the exact
+    // casing of the symbol they are looking for.
+    for (const query of ["formatmessage", "FORMATMESSAGE", "FormatMessage"]) {
+      const insensitive = await findSymbol(connection, query);
+      assert.deepEqual(
+        insensitive.map((match) => match.name),
+        ["formatMessage"],
+        `"${query}" ska hitta formatMessage oavsett skiftläge`,
+      );
+    }
+
     // Callers of formatMessage: both the method and the standalone function.
     const callers = await queryNeighbors(connection, {
       paths: [symbols[0].path],
@@ -54,11 +67,9 @@ try {
       depth: 1,
     });
     assert.deepEqual(mocks.nodes, []);
-    assert.equal(mocks.unresolved[indexPath].unresolvedImports, 1);
+    assert.equal(mocks.counts[indexPath].unresolvedImports, 1);
 
-    // unresolvedCalls must be a real measurement, not a fabricated 0: the
-    // function-level count and the file-level rollup must agree, since
-    // unresolved.ts's only function is useHelper.
+    // unresolvedCalls must be a real measurement, not a fabricated 0.
     const unresolvedFilePath = path.join(fixtureDirectory, "src", "unresolved.ts");
     const useHelperPath = `${unresolvedFilePath}:useHelper`;
 
@@ -68,18 +79,47 @@ try {
       direction: "out",
       depth: 1,
     });
-    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedCalls, 1);
+    assert.deepEqual(functionLevel.nodes.map((node) => node.name), ["helper"]);
+    assert.equal(functionLevel.counts[useHelperPath].unresolvedCalls, 0);
+    assert.equal(functionLevel.counts[useHelperPath].externalCalls, 0);
     // A Function has no imports/mocks of its own: null, not a fabricated 0.
-    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedImports, null);
-    assert.equal(functionLevel.unresolved[useHelperPath].unresolvedMocks, null);
+    assert.equal(functionLevel.counts[useHelperPath].unresolvedImports, null);
+    assert.equal(functionLevel.counts[useHelperPath].unresolvedMocks, null);
 
+    // A call into the TypeScript lib is external, never unresolved: reporting
+    // JSON.stringify as call debt is what made a healthy graph look broken.
+    const useExternalPath = `${unresolvedFilePath}:useExternal`;
+    const externalLevel = await queryNeighbors(connection, {
+      paths: [useExternalPath],
+      edges: ["CALLS"],
+      direction: "out",
+      depth: 1,
+    });
+    assert.equal(externalLevel.counts[useExternalPath].externalCalls, 1);
+    assert.equal(externalLevel.counts[useExternalPath].unresolvedCalls, 0);
+
+    // Both counters roll up to the file, and the two never bleed into each
+    // other: unresolved.ts holds two external calls (useExternal, helper) and
+    // one genuine miss (useUnknown).
     const fileLevel = await queryNeighbors(connection, {
       paths: [unresolvedFilePath],
       edges: ["CALLS"],
       direction: "out",
       depth: 1,
     });
-    assert.equal(fileLevel.unresolved[unresolvedFilePath].unresolvedCalls, 1);
+    assert.equal(fileLevel.counts[unresolvedFilePath].externalCalls, 2);
+    assert.equal(fileLevel.counts[unresolvedFilePath].unresolvedCalls, 1);
+
+    // A Type carries none of these counters — null across the board, and the
+    // new one must not break that by defaulting to 0.
+    const typePath = `${path.join(fixtureDirectory, "src", "app.ts")}:Application`;
+    const typeLevel = await queryNeighbors(connection, {
+      paths: [typePath],
+      edges: ["HAS_METHOD"],
+      direction: "out",
+      depth: 1,
+    });
+    assert.equal(typeLevel.counts[typePath].externalCalls, null);
 
     // A path that backs no node at all is reported as unknown, never silently
     // conflated with "found, no neighbours".
@@ -90,7 +130,7 @@ try {
       depth: 1,
     });
     assert.deepEqual(missing.nodes, []);
-    assert.deepEqual(missing.unresolved, {});
+    assert.deepEqual(missing.counts, {});
     assert.deepEqual(missing.unknownPaths, ["/nope/does-not-exist.ts"]);
 
     // The interpolation rule's entire defence is the Zod enum plus this runtime

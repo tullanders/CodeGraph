@@ -15,7 +15,11 @@ export async function createGraphDatabase(databasePath = DEFAULT_DATABASE_PATH) 
   await execute(connection, "CREATE REL TABLE MOCKS(FROM File TO File);");
   await execute(connection, "CREATE NODE TABLE Type(path STRING, name STRING, kind STRING, line INT64, endLine INT64, PRIMARY KEY (path));");
   await execute(connection, "CREATE REL TABLE DECLARES(FROM File TO Type);");
-  await execute(connection, "CREATE NODE TABLE Function(path STRING, name STRING, kind STRING, line INT64, endLine INT64, unresolvedCalls INT64, PRIMARY KEY (path));");
+  // externalCalls and unresolvedCalls are separate on purpose: a call into
+  // node_modules is expected debt this graph can never repay, a call we failed
+  // to resolve inside the seeded projects is a real gap. One column for both
+  // makes a healthy graph unreadable.
+  await execute(connection, "CREATE NODE TABLE Function(path STRING, name STRING, kind STRING, line INT64, endLine INT64, externalCalls INT64, unresolvedCalls INT64, PRIMARY KEY (path));");
   await execute(connection, "CREATE REL TABLE HAS_FUNCTION(FROM File TO Function);");
   await execute(connection, "CREATE REL TABLE HAS_METHOD(FROM Type TO Function);");
   await execute(connection, "CREATE REL TABLE CALLS(FROM Function TO Function);");

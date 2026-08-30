@@ -7,3 +7,11 @@ export const helper = (value: string) => value.trim();
 export function useHelper() {
   return helper("hello");
 }
+
+export function useExternal(value: string) {
+  return JSON.stringify(value);
+}
+
+export function useUnknown(target: any) {
+  return target.whatever();
+}

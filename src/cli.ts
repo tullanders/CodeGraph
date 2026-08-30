@@ -1,7 +1,7 @@
 import { access, appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readTsconfigPaths, writeTsconfigPaths } from "./config.js";
+import { findAdditionalTsconfigs, readTsconfigPaths, writeTsconfigPaths } from "./config.js";
 import { findGraphDatabase, graphDatabasePathFor } from "./paths.js";
 import { seedCodebase } from "./seed.js";
 
@@ -91,13 +91,36 @@ async function ensureMcpConfiguration() {
   console.log(`Konfigurerade CodeGraph i ${mcpConfigPath}`);
 }
 
+// Nothing about an empty result tells a reader whether the code is missing or
+// merely unseeded, so the graph has to volunteer what it left out. Printed
+// after seeding, and only when something is genuinely missing — a suggestion
+// that fires every time is one the user learns to skip.
+async function reportUnseededTsconfigs(chosen: string[]) {
+  const additional = await findAdditionalTsconfigs(projectRoot, chosen);
+
+  if (additional.length === 0) {
+    return;
+  }
+
+  const relative = (entry: string) => path.relative(projectRoot, entry);
+  console.log(`\nGrafen tacker ${chosen.length} tsconfig-projekt. Dessa hittades i projektet men ingar inte:`);
+
+  for (const entry of additional) {
+    console.log(`- ${relative(entry)}`);
+  }
+
+  const flags = [...chosen, ...additional].map((entry) => `--tsconfig ${relative(entry)}`).join(" ");
+  console.log(`Ta med dem med: codegraph seed ${flags}`);
+}
+
 async function seed(databasePath: string, tsconfigPaths: string[]) {
   await requireTsconfigs(tsconfigPaths);
   const summary = await seedCodebase(tsconfigPaths, databasePath);
   console.log(
-    `Seedade ${summary.files} filer, ${summary.types} typer, ${summary.functions} funktioner och ${summary.imports} importer (${summary.unresolvedImports} olosta importer). ${summary.calls} anrop losta (${summary.unresolvedCalls} olosta anrop). ${summary.mocks} mockar losta (${summary.unresolvedMocks} olosta mockar).`,
+    `Seedade ${summary.files} filer, ${summary.types} typer, ${summary.functions} funktioner och ${summary.imports} importer (${summary.unresolvedImports} olosta importer). ${summary.calls} anrop losta, ${summary.externalCalls} externa (node_modules/lib, forvantat), ${summary.unresolvedCalls} olosta. ${summary.mocks} mockar losta (${summary.unresolvedMocks} olosta mockar).`,
   );
   console.log(`Grafen ligger i ${databasePath}`);
+  await reportUnseededTsconfigs(tsconfigPaths);
 }
 
 async function init(tsconfigPaths: string[]) {
