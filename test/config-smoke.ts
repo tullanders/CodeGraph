@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readTsconfigPaths, writeTsconfigPaths } from "../src/config.js";
+import { findAdditionalTsconfigs, readTsconfigPaths, writeTsconfigPaths } from "../src/config.js";
 
 const root = await mkdtemp(path.join(os.tmpdir(), "codegraph-config-"));
 
@@ -69,6 +69,51 @@ try {
     );
   } finally {
     await rm(malformedRoot, { recursive: true, force: true });
+  }
+  // findAdditionalTsconfigs: a monorepo whose root tsconfig is the only one
+  // seeded silently leaves whole packages out of the graph. The single most
+  // expensive way to be wrong about CodeGraph is to search a package that was
+  // never indexed and read the empty result as "this code doesn't exist", so
+  // init has to say out loud what it did not seed.
+  const monorepo = await mkdtemp(path.join(os.tmpdir(), "codegraph-scan-"));
+  try {
+    const rootTsconfig = path.join(monorepo, "tsconfig.json");
+    const appTsconfig = path.join(monorepo, "apps", "app", "tsconfig.json");
+    const pdfTsconfig = path.join(monorepo, "packages", "pdf", "tsconfig.json");
+    // Must never be offered: a dependency's own tsconfig, and a worktree copy
+    // under a dot-directory — both would seed files the user never edits.
+    const vendored = path.join(monorepo, "node_modules", "some-package", "tsconfig.json");
+    const worktree = path.join(monorepo, ".claude", "worktrees", "feat", "tsconfig.json");
+    // Deeper than the scan goes: the walk is bounded so init stays cheap on a
+    // large repository rather than descending the whole tree.
+    const tooDeep = path.join(monorepo, "a", "b", "c", "d", "e", "tsconfig.json");
+
+    for (const file of [rootTsconfig, appTsconfig, pdfTsconfig, vendored, worktree, tooDeep]) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, "{}\n");
+    }
+
+    assert.deepEqual(
+      await findAdditionalTsconfigs(monorepo, [rootTsconfig]),
+      [appTsconfig, pdfTsconfig],
+      "bara riktiga paket-tsconfig ska föreslås — inte node_modules, inte dolda kataloger, inte djupare än vandringen går",
+    );
+
+    // Already chosen is already covered: only what is genuinely missing is
+    // reported, otherwise the suggestion becomes noise the user learns to skip.
+    assert.deepEqual(
+      await findAdditionalTsconfigs(monorepo, [rootTsconfig, pdfTsconfig]),
+      [appTsconfig],
+      "en tsconfig som redan ingår ska inte föreslås igen",
+    );
+
+    assert.deepEqual(
+      await findAdditionalTsconfigs(monorepo, [rootTsconfig, appTsconfig, pdfTsconfig]),
+      [],
+      "när allt ingår ska ingenting föreslås",
+    );
+  } finally {
+    await rm(monorepo, { recursive: true, force: true });
   }
 } finally {
   await rm(root, { recursive: true, force: true });

@@ -85,6 +85,8 @@ claude mcp list
 claude mcp get codegraph
 ```
 
+Efter varje `codegraph init` och `codegraph seed` skrivs varje `tsconfig.json` i projektet som **inte** ingick i grafen ut, med ett fardigt kommando som tar med dem. En graf som bara tacker `apps/app` ser inifran ut som en komplett graf — en sokning i ett oseedat paket ger noll traffar, vilket inte gar att skilja fran "koden finns inte".
+
 Servern exponerar tre skrivskyddade verktyg:
 
 - `graph_status`: när grafen seedades, mot vilken commit, vilka tsconfig som ingick, och hur många TypeScript-filer som ändrats sedan dess. Anropa detta innan du litar på ett radintervall.

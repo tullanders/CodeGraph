@@ -82,6 +82,7 @@ Konsekvensen för monorepos: `codegraph seed` från en underkatalog hittar och �
 
 - `writeTsconfigPaths(projectRoot, tsconfigPaths)` — skriver konfigurationen, skapar `.codegraph/` om den saknas.
 - `readTsconfigPaths(projectRoot)` — läser konfigurationen. Saknas filen (`ENOENT`) faller den tillbaka på `<projectRoot>/tsconfig.json` som enda post, så ett projekt utan `config.json` fortfarande fungerar. Finns filen men saknar en icke-tom `tsconfigs`-lista kastas ett fel i stället för att tyst seeda ingenting.
+- `findAdditionalTsconfigs(projectRoot, chosen)` — varje `tsconfig.json` i projektet som `chosen` **inte** täcker. Vandringen går högst tre katalognivåer ner (`apps/<namn>/`, `packages/<namn>/` — djupare kostar mer än det ger) och hoppar över `node_modules` och punktkataloger, så varken ett beroendes egen tsconfig eller en worktree-kopia föreslås. En oläsbar katalog ger tyst tom lista: hela poängen är ett förslag, inte en garanti. `cli.ts` skriver ut resultatet efter varje seedning.
 
 Just därför skriver `ensureGitignore` i `cli.ts` numera `.codegraph/kuzu*` i `.gitignore`, inte hela `.codegraph/`: den binära databasfilen (och dess `.wal`) ska förbli ignorerad, men `config.json` ska kunna committas.
 
@@ -183,6 +184,8 @@ Varje anrop till `withConnection` köas bakom föregående via en promise-kedja,
 4. Skriver tsconfig-listan till `.codegraph/config.json` och kör en första seedning mot `graphDatabasePathFor(projectRoot)`.
 
 `codegraph seed` kräver och seedar likadant, men läser tsconfig-listan från `--tsconfig`-flaggor om de angetts, annars från `.codegraph/config.json` via `readTsconfigPaths`, och seedar mot `findGraphDatabase(projectRoot) ?? initDatabasePath` — den befintliga grafen längre upp i katalogträdet om en redan finns, annars samma plats `init` skulle ha skapat den.
+
+Efter varje seedning — både `init` och `seed` — kör `reportUnseededTsconfigs` en avgränsad vandring genom projektet (`findAdditionalTsconfigs`, se §3) och skriver ut varje `tsconfig.json` som **inte** ingick, tillsammans med ett färdigt kommando som tar med dem. En graf som bara täcker `apps/app` ser inifrån ut precis som en komplett graf: en sökning i `packages/pdf` ger noll träffar, och noll träffar går inte att skilja från "koden finns inte". Utskriften är den enda platsen där den skillnaden går att göra, och den kommer bara när något faktiskt saknas.
 
 Sökvägarna i `.mcp.json` pekar tillbaka på CodeGraph-installationen (`packageRoot`), medan `cwd` sätts till målprojektet. Kommandot skrivs som bara `"node"` snarare än en absolut sökväg — kommentaren i koden förklarar varför: den absoluta node-sökvägen varierar mellan terminaler och versionshanterare på samma maskin.
 
