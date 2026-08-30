@@ -1,6 +1,6 @@
 # CodeGraph PoC
 
-En lokal TypeScript-kodgraf som seedas fran `tsconfig.json` med `ts-morph`, lagras i Kuzu och gors tillganglig for en kodagent via en MCP-server over stdio.
+En lokal TypeScript-kodgraf som seedas fran en eller flera `tsconfig.json` med `ts-morph`, lagras i Kuzu och gors tillganglig for en kodagent via en MCP-server over stdio.
 
 ## Kom igang
 
@@ -37,7 +37,15 @@ cd /sokvag/till/projektet
 codegraph init
 ```
 
-Kommandot hittar `tsconfig.json` i aktuell katalog, skapar `.codegraph/kuzu`, lagger till `.codegraph/` i `.gitignore`, och skapar eller uppdaterar projektets `.mcp.json` med MCP-serverns korrekta sokvagar. Kor `codegraph seed` fran samma katalog nar koden andras.
+Kommandot hittar `tsconfig.json` i aktuell katalog, skapar `.codegraph/kuzu`, lagger till `.codegraph/kuzu*` i `.gitignore`, skriver projektets tsconfig-sokvagar till `.codegraph/config.json`, och skapar eller uppdaterar projektets `.mcp.json` med MCP-serverns korrekta sokvagar. Kor `codegraph seed` fran samma katalog nar koden andras.
+
+For ett monorepo med flera tsconfig, ange varje sokvag med en upprepad `--tsconfig`-flagga:
+
+```bash
+codegraph init --tsconfig tsconfig.json --tsconfig packages/pdf/tsconfig.json
+```
+
+Sokvagarna sparas relativt projektets rot i `.codegraph/config.json`, sa filen kan checkas in och delas med teamet. `codegraph seed` utan flaggor laser om samma lista fran `.codegraph/config.json`; ange `--tsconfig` igen om listan ska andras.
 
 Lagg till servern i din MCP-klient, till exempel:
 
