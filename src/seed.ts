@@ -76,6 +76,7 @@ export async function seedCodebase(
   }
 
   await rm(resolvedDatabasePath, { force: true, recursive: true });
+  await rm(`${resolvedDatabasePath}.wal`, { force: true });
 
   const { database, connection } = await createGraphDatabase(resolvedDatabasePath);
 

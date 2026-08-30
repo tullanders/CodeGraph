@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Connection, Database, KuzuValue } from "kuzu";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { describeFreshness } from "./graph-meta.js";
@@ -26,17 +27,49 @@ function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-async function withConnection<T>(databasePath: string, run: (connection: Connection) => Promise<T>): Promise<T> {
-  const { database, connection } = openGraphDatabase(databasePath);
-
-  try {
-    return await run(connection);
-  } finally {
-    await closeDatabase(database, connection);
-  }
+interface CachedConnection {
+  databasePath: string;
+  inode: number;
+  modifiedMs: number;
+  database: Database;
+  connection: Connection;
 }
 
-async function closeDatabase(database: Database, connection: Connection) {
+let cached: CachedConnection | undefined;
+
+// Opening a 26 MB Kuzu file costs ~37ms; a stat costs microseconds.
+// Kuzu takes no exclusive lock, so the seeder can write while the server is
+// alive — but an open connection then keeps serving the OLD graph without
+// throwing. Inode and mtime are what reveal that the seeder swapped the file.
+export async function withConnection<T>(
+  databasePath: string,
+  run: (connection: Connection) => Promise<T>,
+): Promise<T> {
+  const stats = statSync(databasePath);
+
+  if (
+    cached &&
+    cached.databasePath === databasePath &&
+    cached.inode === stats.ino &&
+    cached.modifiedMs === stats.mtimeMs
+  ) {
+    return run(cached.connection);
+  }
+
+  await closeCachedConnection();
+  const { database, connection } = openGraphDatabase(databasePath);
+  cached = { databasePath, inode: stats.ino, modifiedMs: stats.mtimeMs, database, connection };
+
+  return run(connection);
+}
+
+export async function closeCachedConnection() {
+  if (!cached) {
+    return;
+  }
+
+  const { database, connection } = cached;
+  cached = undefined;
   await connection.close();
   await database.close();
 }
@@ -357,6 +390,12 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("codegraph MCP-server startad over stdio.");
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      void closeCachedConnection().finally(() => process.exit(0));
+    });
+  }
 }
 
 // Only start the transport when this file runs as a program, not when a test imports it.
