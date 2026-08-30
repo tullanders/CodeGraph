@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { FunctionDeclaration, MethodDeclaration, Project, SourceFile, SyntaxKind, ts } from "ts-morph";
+import { CallExpression, Node, Project, SourceFile, SyntaxKind, ts } from "ts-morph";
 import { currentCommit, writeGraphMeta } from "./graph-meta.js";
 import { closeGraphDatabase, createGraphDatabase, singleResult } from "./schema.js";
 
@@ -13,6 +13,15 @@ export interface SeedSummary {
   types: number;
   functions: number;
   calls: number;
+  // Calls whose callee is declared outside the seeded file set — node_modules,
+  // the TypeScript lib, another project. Expected and unfixable: a graph of
+  // these tsconfig projects cannot contain those nodes. Reported so the number
+  // is visible, never as a defect.
+  externalCalls: number;
+  // Calls the seeder genuinely could not place: no symbol at all (a call
+  // through `any`), or a callee declared inside the seeded files that we do
+  // not index as a Function node. This is the only call counter that says
+  // anything about graph quality.
   unresolvedCalls: number;
 }
 
@@ -99,12 +108,12 @@ export async function seedCodebase(
     `);
     const insertFunction = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, externalCalls: 0, unresolvedCalls: 0})
       MERGE (file)-[:HAS_FUNCTION]->(fn)
     `);
     const insertMethod = await connection.prepare(`
       MATCH (type:Type {path: $typePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, externalCalls: 0, unresolvedCalls: 0})
       MERGE (type)-[:HAS_METHOD]->(fn)
     `);
     const insertCall = await connection.prepare(`
@@ -117,7 +126,7 @@ export async function seedCodebase(
     `);
     const setFunctionUnresolved = await connection.prepare(`
       MATCH (fn:Function {path: $path})
-      SET fn.unresolvedCalls = $unresolvedCalls
+      SET fn.externalCalls = $externalCalls, fn.unresolvedCalls = $unresolvedCalls
     `);
 
     for (const sourceFile of sourceFiles) {
@@ -130,6 +139,7 @@ export async function seedCodebase(
     // from one that could not be built.
     const unresolvedImportsByFile = new Map<string, number>();
     const unresolvedMocksByFile = new Map<string, number>();
+    const externalCallsByFunction = new Map<string, number>();
     const unresolvedCallsByFunction = new Map<string, number>();
 
     let imports = 0;
@@ -229,8 +239,12 @@ export async function seedCodebase(
       }
     }
 
-    // Maps a function/method declaration node to its Function node path, so call sites can be resolved.
-    const functionPathByDeclaration = new Map<FunctionDeclaration | MethodDeclaration, string>();
+    // Maps the declaration node a call site resolves to onto its Function node,
+    // plus the body to scan for outgoing calls. Keyed by declaration because
+    // that is what the type checker hands back for a callee — for an arrow
+    // function bound to a const, that is the VariableDeclaration, not the
+    // arrow itself, so the arrow can never be the key.
+    const indexedFunctions = new Map<Node, { path: string; body: Node | undefined }>();
     let functions = 0;
 
     for (const sourceFile of sourceFiles) {
@@ -253,7 +267,35 @@ export async function seedCodebase(
           endLine: declaration.getEndLineNumber(),
         }));
         await result.close();
-        functionPathByDeclaration.set(declaration, fnPath);
+        indexedFunctions.set(declaration, { path: fnPath, body: declaration.getBody() });
+        functions += 1;
+      }
+
+      // `export const handler = () => {}` is a function in every sense that
+      // matters here, and in a lot of TypeScript it is the dominant style.
+      // Leaving these out cost twice: the callee was missing, so every call to
+      // it counted as a miss, and the calls inside its own body were never
+      // scanned at all. kind stays "function" — how the function got its name
+      // is not something a caller navigating the graph should have to branch on.
+      for (const declaration of sourceFile.getVariableDeclarations()) {
+        const initializer = declaration.getInitializer();
+
+        if (!initializer?.isKind(SyntaxKind.ArrowFunction) && !initializer?.isKind(SyntaxKind.FunctionExpression)) {
+          continue;
+        }
+
+        const name = declaration.getName();
+        const fnPath = `${filePath}:${name}`;
+        const result = singleResult(await connection.execute(insertFunction, {
+          filePath,
+          fnPath,
+          name,
+          kind: "function",
+          line: declaration.getStartLineNumber(),
+          endLine: declaration.getEndLineNumber(),
+        }));
+        await result.close();
+        indexedFunctions.set(declaration, { path: fnPath, body: initializer.getBody() });
         functions += 1;
       }
 
@@ -278,33 +320,49 @@ export async function seedCodebase(
             endLine: method.getEndLineNumber(),
           }));
           await result.close();
-          functionPathByDeclaration.set(method, fnPath);
+          indexedFunctions.set(method, { path: fnPath, body: method.getBody() });
           functions += 1;
         }
       }
     }
 
     let calls = 0;
+    let externalCalls = 0;
     let unresolvedCalls = 0;
 
-    for (const [declaration, callerPath] of functionPathByDeclaration) {
-      const body = declaration.getBody();
-
+    for (const { path: callerPath, body } of indexedFunctions.values()) {
       if (!body) {
         continue;
       }
 
-      for (const callExpression of body.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      for (const callExpression of callExpressionsIn(body)) {
         const symbol = callExpression.getExpression().getSymbol();
         const resolvedSymbol = symbol?.getAliasedSymbol() ?? symbol;
-        const targetDeclaration = resolvedSymbol?.getValueDeclaration();
-        const calleePath = targetDeclaration ? functionPathByDeclaration.get(
-          targetDeclaration as FunctionDeclaration | MethodDeclaration,
-        ) : undefined;
+        // getValueDeclaration() is empty for anything declared only as a type
+        // — the fluent builder methods of a query library, for instance, whose
+        // .d.ts carries method signatures and no implementation. Falling back
+        // to the first declaration is what lets those be recognized as
+        // external rather than counted as our own failure to resolve them.
+        const targetDeclaration = resolvedSymbol?.getValueDeclaration() ?? resolvedSymbol?.getDeclarations()[0];
+        const calleePath = targetDeclaration ? indexedFunctions.get(targetDeclaration)?.path : undefined;
 
         if (!calleePath) {
-          unresolvedCallsByFunction.set(callerPath, (unresolvedCallsByFunction.get(callerPath) ?? 0) + 1);
-          unresolvedCalls += 1;
+          // Three outcomes, only the last of which is a defect: the callee is
+          // declared outside the seeded files (external), or we could not
+          // place it at all — no declaration, or one inside the seeded files
+          // that we do not index as a Function node (unresolved).
+          const isExternal =
+            targetDeclaration !== undefined &&
+            !projectFilePaths.has(targetDeclaration.getSourceFile().getFilePath());
+
+          if (isExternal) {
+            externalCallsByFunction.set(callerPath, (externalCallsByFunction.get(callerPath) ?? 0) + 1);
+            externalCalls += 1;
+          } else {
+            unresolvedCallsByFunction.set(callerPath, (unresolvedCallsByFunction.get(callerPath) ?? 0) + 1);
+            unresolvedCalls += 1;
+          }
+
           continue;
         }
 
@@ -324,9 +382,10 @@ export async function seedCodebase(
       await result.close();
     }
 
-    for (const functionPath of functionPathByDeclaration.values()) {
+    for (const { path: functionPath } of indexedFunctions.values()) {
       const result = singleResult(await connection.execute(setFunctionUnresolved, {
         path: functionPath,
+        externalCalls: externalCallsByFunction.get(functionPath) ?? 0,
         unresolvedCalls: unresolvedCallsByFunction.get(functionPath) ?? 0,
       }));
       await result.close();
@@ -341,6 +400,7 @@ export async function seedCodebase(
       types,
       functions,
       calls,
+      externalCalls,
       unresolvedCalls,
     };
 
@@ -355,6 +415,15 @@ export async function seedCodebase(
   } finally {
     await closeGraphDatabase(database, connection);
   }
+}
+
+// A concise arrow body — `const f = (value) => value.trim()` — IS the call
+// expression rather than a block containing one, so scanning descendants alone
+// would silently miss every call in that very common shape.
+function callExpressionsIn(body: Node): CallExpression[] {
+  const nested = body.getDescendantsOfKind(SyntaxKind.CallExpression);
+
+  return body.isKind(SyntaxKind.CallExpression) ? [body, ...nested] : nested;
 }
 
 // Recognizes vi.mock("...")/jest.mock("...") (and doMock variants) with a static string module specifier.

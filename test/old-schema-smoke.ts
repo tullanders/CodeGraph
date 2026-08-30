@@ -110,7 +110,7 @@ try {
 
     // The exact shape this branch's own columns produce IS relabelled —
     // confirms the positive match for every added column, not just "line".
-    for (const column of ["line", "endLine", "unresolvedImports", "unresolvedMocks", "unresolvedCalls"]) {
+    for (const column of ["line", "endLine", "unresolvedImports", "unresolvedMocks", "externalCalls", "unresolvedCalls"]) {
       assert.throws(
         () => rethrowFriendlyIfStaleSchema(new Error(`Binder exception: Cannot find property ${column} for n.`)),
         (error: unknown) => {

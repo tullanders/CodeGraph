@@ -88,10 +88,10 @@ claude mcp get codegraph
 Servern exponerar tre skrivskyddade verktyg:
 
 - `graph_status`: när grafen seedades, mot vilken commit, vilka tsconfig som ingick, och hur många TypeScript-filer som ändrats sedan dess. Anropa detta innan du litar på ett radintervall.
-- `find_symbol`: hittar filer, typer och funktioner på namn eller sökvägsdel, och returnerar radintervall.
+- `find_symbol`: hittar filer, typer och funktioner på namn eller sökvägsdel, och returnerar radintervall. Matchningen är delsträng och skiftlägesokänslig — `party` hittar både `partyTools` och `createParty`, men inte `parties`. Sök på stammen när du är osäker.
 - `neighbors`: expanderar noder längs `IMPORTS`, `MOCKS`, `CALLS`, `DECLARES`, `HAS_FUNCTION` eller `HAS_METHOD`, i valfri riktning och till djup 1–3.
 
-Varje `neighbors`-svar bär `unresolved`-räknare. En tom nodlista med `unresolved > 0` betyder att grafen inte kunde upplösa relationen — inte att den saknas.
+Varje `neighbors`-svar bär `counts`-räknare per sökväg. `unresolvedImports`/`unresolvedMocks`/`unresolvedCalls` räknar det grafen faktiskt missade: en tom nodlista med en sådan räknare > 0 betyder att relationen inte kunde upplösas — inte att den saknas. `externalCalls` räknar anrop som lämnar de seedade projekten (`node_modules`, TypeScripts lib) och är alltid stort i en riktig kodbas; det säger ingenting om grafens kvalitet och ska inte läsas som skuld.
 
 ## Forutsattningar
 

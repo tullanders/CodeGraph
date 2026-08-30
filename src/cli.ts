@@ -95,7 +95,7 @@ async function seed(databasePath: string, tsconfigPaths: string[]) {
   await requireTsconfigs(tsconfigPaths);
   const summary = await seedCodebase(tsconfigPaths, databasePath);
   console.log(
-    `Seedade ${summary.files} filer, ${summary.types} typer, ${summary.functions} funktioner och ${summary.imports} importer (${summary.unresolvedImports} olosta importer). ${summary.calls} anrop losta (${summary.unresolvedCalls} olosta anrop). ${summary.mocks} mockar losta (${summary.unresolvedMocks} olosta mockar).`,
+    `Seedade ${summary.files} filer, ${summary.types} typer, ${summary.functions} funktioner och ${summary.imports} importer (${summary.unresolvedImports} olosta importer). ${summary.calls} anrop losta, ${summary.externalCalls} externa (node_modules/lib, forvantat), ${summary.unresolvedCalls} olosta. ${summary.mocks} mockar losta (${summary.unresolvedMocks} olosta mockar).`,
   );
   console.log(`Grafen ligger i ${databasePath}`);
 }

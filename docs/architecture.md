@@ -102,7 +102,9 @@ Den enda modulen som äger schemadefinitionen. Två ingångar:
 - `createGraphDatabase(path)` — skapar katalogen, öppnar databasen och kör alla tio `CREATE ... TABLE`-satser (`File`, `IMPORTS`, `MOCKS`, `Type`, `DECLARES`, `Function`, `HAS_FUNCTION`, `HAS_METHOD`, `CALLS`, `GraphMeta`). Används **bara** av seedningen och av `verify-kuzu`.
 - `openGraphDatabase(path)` — öppnar en befintlig databas utan att röra schemat. Används av MCP-servern och av testerna.
 
-`File` bär numera `unresolvedImports`/`unresolvedMocks` (`INT64`), `Type` och `Function` bär `line`/`endLine` (`INT64`, radintervallet för deklarationen), och `Function` bär dessutom `unresolvedCalls`. Alla skrivs vid `MERGE` och uppdateras senare med `SET` under seedningen (se `src/seed.ts` nedan).
+`File` bär numera `unresolvedImports`/`unresolvedMocks` (`INT64`), `Type` och `Function` bär `line`/`endLine` (`INT64`, radintervallet för deklarationen), och `Function` bär dessutom `externalCalls` och `unresolvedCalls`. Alla skrivs vid `MERGE` och uppdateras senare med `SET` under seedningen (se `src/seed.ts` nedan).
+
+Att anropsräknarna är två och inte en är ett medvetet val: `externalCalls` räknar anrop vars mottagare är deklarerad utanför de seedade filerna (`node_modules`, TypeScripts lib, ett annat projekt) — förväntat och omöjligt att åtgärda, eftersom en graf över dessa tsconfig-projekt aldrig kan innehålla de noderna. `unresolvedCalls` räknar det seedaren faktiskt missade. Slås de ihop dränks den enda siffra som säger något om grafens kvalitet i brus: i en riktig kodbas är förhållandet ungefär 2 000 externa mot 95 verkliga missar, och en läsare som ser ett samlat tal på 2 100 slutar rimligtvis lita på `CALLS` helt i onödan.
 
 Hjälpare: `execute()` (kör och stänger ett resultat), `singleResult()` (Kuzu-bindningen kan returnera `QueryResult | QueryResult[]`; hjälparen normaliserar och kastar om antalet inte är exakt ett) och `closeGraphDatabase()`.
 
@@ -131,14 +133,21 @@ De sex extraktionspassen:
 | Imports | `IMPORTS` | `getModuleSpecifierSourceFile()`; målet måste ligga i unionen av alla projekts filer |
 | Mocks | `MOCKS` | `ts.resolveModuleName()` med filens eget projekts compiler-options |
 | Typer | `Type`, `DECLARES` | Klasser, interface och typalias på toppnivå (`kind`: `class` \| `interface` \| `typeAlias`) |
-| Funktioner | `Function`, `HAS_FUNCTION`, `HAS_METHOD` | Namngivna toppnivåfunktioner och klassmetoder, med `line`/`endLine` |
-| Anrop | `CALLS` | Symbolupplösning via `getSymbol()` → `getAliasedSymbol()` → `getValueDeclaration()` |
+| Funktioner | `Function`, `HAS_FUNCTION`, `HAS_METHOD` | Namngivna toppnivåfunktioner, toppnivåkonstanter bundna till en arrow- eller funktionsuttrycksinitierare, och klassmetoder, med `line`/`endLine` |
+| Anrop | `CALLS`, `externalCalls`, `unresolvedCalls` | Symbolupplösning via `getSymbol()` → `getAliasedSymbol()` → `getValueDeclaration()`, med `getDeclarations()[0]` som reserv |
 
-Anropspasset bygger under funktionspasset en `Map<FunctionDeclaration | MethodDeclaration, string>` från AST-nod till nodens `path`. Den kartan är hela nyckeln till `CALLS`: ett anrop blir en kant **endast** om den upplösta deklarationen finns i kartan. Alltså projektövergripande upplösning, men bara mot de två deklarationsformer som modelleras.
+Anropspasset bygger under funktionspasset en `Map<Node, { path, body }>` från AST-nod till nodens `path` och den kropp som ska skannas efter utgående anrop. Kartan nycklas på **deklarationen**, eftersom det är den typcheckaren lämnar tillbaka för en mottagare — för en arrow-funktion bunden till en `const` är det `VariableDeclaration`, aldrig arrow-noden själv. Ett anrop blir en kant **endast** om den upplösta deklarationen finns i kartan.
+
+Misslyckas uppslaget klassificeras anropet i stället, och skillnaden mellan de två utfallen är hela poängen:
+
+- **externt** — deklarationen finns, men i en fil utanför `projectFilePaths`. `getValueDeclaration()` är tom för allt som bara deklarerats som typ (ett frågebiblioteks kedjade metoder, vars `.d.ts` bär signaturer utan implementation), så reserven `getDeclarations()[0]` är det som gör att de känns igen som externa i stället för att bokföras som seedarens eget misslyckande.
+- **oupplöst** — ingen deklaration alls (ett anrop genom `any`), eller en deklaration inne i de seedade filerna som inte indexeras som en `Function`-nod.
+
+En koncis arrow-kropp (`const f = (v) => v.trim()`) **är** anropsuttrycket i stället för ett block som innehåller ett, så `callExpressionsIn()` tar med kroppsnoden själv — annars skulle varje anrop i den mycket vanliga formen tyst falla bort.
 
 Mock-igenkänningen (`getMockModuleSpecifier`) matchar syntaktiskt på `vi.mock`, `vi.doMock`, `jest.mock`, `jest.doMock` med ett statiskt strängargument. Ingen typkontroll, inga variabla modulspecifikationer.
 
-Två uppdateringspass, körda efter extraktionen, skriver de per-nod-räknade motparterna till aggregatsiffrorna i `SeedSummary`: `File.unresolvedImports`/`unresolvedMocks` och `Function.unresolvedCalls` sätts med `SET`, en gång per fil respektive funktion, från kartor byggda under de tidigare passen. Utan dem skulle frågelagret bara kunna säga "den här filen har inga `IMPORTS`-kanter" — vilket ser identiskt ut oavsett om filen faktiskt importerar ingenting, eller om allt den importerar var oupplösbart. Se §4 och §6 för hur `neighbors` använder detta.
+Två uppdateringspass, körda efter extraktionen, skriver de per-nod-räknade motparterna till aggregatsiffrorna i `SeedSummary`: `File.unresolvedImports`/`unresolvedMocks` och `Function.externalCalls`/`unresolvedCalls` sätts med `SET`, en gång per fil respektive funktion, från kartor byggda under de tidigare passen. Utan dem skulle frågelagret bara kunna säga "den här filen har inga `IMPORTS`-kanter" — vilket ser identiskt ut oavsett om filen faktiskt importerar ingenting, eller om allt den importerar var oupplösbart. Se §4 och §6 för hur `neighbors` använder detta.
 
 Sist skrivs `GraphMeta`: seedningstidpunkt, git-commit (tomt om katalogen inte är ett gitrepo), den absoluta tsconfig-listan, och hela `SeedSummary` — grunden för `graph_status`.
 
@@ -154,7 +163,7 @@ En `McpServer` över `StdioServerTransport` med tre verktyg:
 
 Detta ersätter de fyra gamla `get_file_*`-verktygen. Mönstret de använde — noll träffar ger fel, flera träffar ger en kandidatlista och grafen frågas aldrig, exakt en träff kör frågan — är medvetet överspelat: `find_symbol` returnerar alla träffar med sina exakta sökvägar, och anroparen klistrar in de exakta sökvägarna i `neighbors`. Ingen gissning vid tvetydighet, men heller ingen tvingad omfrågning vid flera kandidater.
 
-`neighbors` vet vilka (kant, riktning) → nodtabell-kombinationer som är lagliga via en statisk `EDGE_SCHEMA`, hämtad direkt ur `schema.ts`'s `CREATE REL TABLE`-satser (t.ex. `IMPORTS`: `File`→`File`, `HAS_METHOD`: `Type`→`Function`). Frågeloopen konstruerar aldrig en kombination schemat inte tillåter — den provar och sväljer inte fel, den slår upp rätt tabell direkt. Svaret innehåller alltid `unresolved`-räknare per given sökväg: `null` betyder att räknaren inte gäller den nodtypen (en `Function` har ingen `unresolvedImports`), ett tal betyder att den faktiskt mättes — även om värdet är 0. Filnivåns `unresolvedCalls` är dessutom en riktig körtidssumma, inte en lagrad kolumn: den summerar `unresolvedCalls` över filens egna funktioner (`HAS_FUNCTION`) **och** över metoderna på typer filen deklarerar (`DECLARES`→`HAS_METHOD`). `unknownPaths` listar sökvägar som inte matchar någon nod alls — skilt från en sökväg som matchar en nod utan grannar.
+`neighbors` vet vilka (kant, riktning) → nodtabell-kombinationer som är lagliga via en statisk `EDGE_SCHEMA`, hämtad direkt ur `schema.ts`'s `CREATE REL TABLE`-satser (t.ex. `IMPORTS`: `File`→`File`, `HAS_METHOD`: `Type`→`Function`). Frågeloopen konstruerar aldrig en kombination schemat inte tillåter — den provar och sväljer inte fel, den slår upp rätt tabell direkt. Svaret innehåller alltid `counts` per given sökväg: `null` betyder att räknaren inte gäller den nodtypen (en `Function` har ingen `unresolvedImports`), ett tal betyder att den faktiskt mättes — även om värdet är 0. `externalCalls` hålls isär från `unresolvedCalls` av samma skäl som i schemat (§3): ett stort tal i den förra är förväntat och säger inget om grafen. Filnivåns bägge anropssummor är dessutom riktiga körtidssummor, inte lagrade kolumner: de summerar över filens egna funktioner (`HAS_FUNCTION`) **och** över metoderna på typer filen deklarerar (`DECLARES`→`HAS_METHOD`). `unknownPaths` listar sökvägar som inte matchar någon nod alls — skilt från en sökväg som matchar en nod utan grannar.
 
 `getDatabasePath()` anropar `findGraphDatabase(process.cwd())` — samma uppåtsökande upplösning som CLI:t använder, delad via `src/paths.ts`. Hittas ingen graf kastas ett fel som listar varje uppsökt katalog och pekar mot `codegraph init`.
 
@@ -211,6 +220,7 @@ erDiagram
         string kind
         int64 line
         int64 endLine
+        int64 externalCalls
         int64 unresolvedCalls
     }
 ```
@@ -224,13 +234,14 @@ Identitet är den bärande designregeln — allt identifieras av sökväg, aldri
 | `File` | `/abs/väg/till/fil.ts` | — |
 | `Type` | `/abs/väg/fil.ts:Klassnamn` | `class` \| `interface` \| `typeAlias` |
 | `Function` (fristående) | `/abs/väg/fil.ts:funktionsnamn` | `function` |
+| `Function` (arrow-konstant) | `/abs/väg/fil.ts:konstantnamn` | `function` |
 | `Function` (metod) | `/abs/väg/fil.ts:Klassnamn.metodnamn` | `method` |
 
 `File.fileName` lagrar basnamnet, vilket gör det billigt att presentera och gruppera träffar utan strängbearbetning i frågelagret.
 
 `line`/`endLine` på `Type` och `Function` är deklarationens radintervall (`getStartLineNumber()`/`getEndLineNumber()`), skrivet direkt vid `MERGE`. Det är vad som gör det möjligt att peka en agent mot exakta rader i stället för hela filen (se `find_symbol` i §3).
 
-`File.unresolvedImports`/`unresolvedMocks` och `Function.unresolvedCalls` persisteras direkt på noden — skrivna med `SET` efter respektive extraktionspass, inte beräknade vid frågetillfället. Det är vad som gör det möjligt att skilja "den här filen importerar ärligt talat ingenting" från "allt den försökte importera gick inte att slå upp": en tom `IMPORTS`-lista tillsammans med `unresolvedImports: 0` är den förra, tillsammans med `unresolvedImports: 3` är den senare.
+`File.unresolvedImports`/`unresolvedMocks` och `Function.externalCalls`/`unresolvedCalls` persisteras direkt på noden — skrivna med `SET` efter respektive extraktionspass, inte beräknade vid frågetillfället. Det är vad som gör det möjligt att skilja "den här filen importerar ärligt talat ingenting" från "allt den försökte importera gick inte att slå upp": en tom `IMPORTS`-lista tillsammans med `unresolvedImports: 0` är den förra, tillsammans med `unresolvedImports: 3` är den senare.
 
 ## 5. Flöden
 
@@ -258,7 +269,7 @@ sequenceDiagram
         S->>M: fråga AST
         S->>K: execute(prepared, params)
     end
-    S->>K: SET unresolvedImports/unresolvedMocks per File, unresolvedCalls per Function
+    S->>K: SET unresolvedImports/unresolvedMocks per File, externalCalls/unresolvedCalls per Function
     S->>K: MERGE GraphMeta (seededAt, commit, tsconfigs, counts)
     S-->>C: SeedSummary
     C-->>U: rapport med upplösta/ej upplösta
@@ -308,12 +319,13 @@ Avsiktliga avgränsningar för PoC:en:
 
 Begränsningar som är konsekvenser av implementationen snarare än designval, och som är värda att känna till innan man litar på siffrorna eller resultaten:
 
-- **`unresolvedCalls` är brus, inte en felsignal.** Varje `console.log`, varje anrop till en arrow-funktion i en `const`, varje biblioteksanrop räknas in. Ett högt tal betyder inget i sig.
-- **`CALLS` täcker bara två deklarationsformer.** `const f = () => {}` och anrop utanför en funktions- eller metodkropp (toppnivåkod, klassfältsinitierare) blir aldrig kanter.
+- **`CALLS` täcker tre deklarationsformer.** Funktionsdeklarationer, klassmetoder och toppnivåkonstanter med en arrow- eller funktionsuttrycksinitierare. En arrow-funktion i en **nästlad** scope, en metod i ett objektliteral, och anrop utanför någon av dessa kroppar (toppnivåkod, klassfältsinitierare) blir aldrig kanter — de räknas som `unresolvedCalls` respektive räknas inte alls.
+- **Destrukturerade importbindningar löses inte.** `const { createInvoice } = await import(...)` ger en `BindingElement` som inte finns i deklarationskartan, så anropet räknas som oupplöst även när målet ligger i grafen.
+- **`externalCalls` beror på var TypeScript hittar deklarationen, inte på vad som faktiskt körs.** Ett workspace-paket som löses mot en byggd `.d.ts` i stället för sin källa räknas som externt, precis som ett riktigt npm-paket.
 - **TypeScript-överlagringar dubbelräknas.** `getFunctions()` returnerar både överlagringssignaturerna och implementationen. De delar `path`, så `MERGE` kollapsar dem till en nod korrekt — men `SeedSummary.functions` räknar varje deklaration.
 - **Kollision vid deklarationssammanslagning.** En klass och ett interface med samma namn i samma fil ger samma `Type.path` med olika `kind` och bryter mot primärnyckeln.
 - **Mock-passet skannar allt.** `getDescendantsOfKind(CallExpression)` körs över varje källfil, inte bara testfiler.
-- **Substrängsmatchning saknar ankare.** En sökning på `"app.ts"` i `find_symbol` matchar även `myapp.ts` och `app.test.ts` — den precisionen är oförändrad från tidigare, bara flyttad från `resolveFileQuery` till `find_symbol`. Dessutom har `find_symbol` ingen resultatgräns: en enteckens-sökning kan i princip serialisera hela grafen till ett enda svar.
+- **Substrängsmatchning saknar ankare och stemming.** Matchningen är skiftlägesokänslig (`lower()` på bägge sidor), men fortfarande ren delsträng: en sökning på `"app.ts"` i `find_symbol` matchar även `myapp.ts` och `app.test.ts`, och en sökning på `party` hittar aldrig `parties` — den precisionen är oförändrad från tidigare, bara flyttad från `resolveFileQuery` till `find_symbol`. Dessutom har `find_symbol` ingen resultatgräns: en enteckens-sökning kan i princip serialisera hela grafen till ett enda svar.
 - **En fil i flera projekts include-mönster tar tyst det första projektets compiler-options.** `projectByFilePath` sparar bara den första matchningen (`!projectByFilePath.has(filePath)`); i en monorepo med olika `strict`-inställningar per paket kan det ge en annan upplösning än den agenten förväntar sig, utan varning.
 - **`ensureGitignore` migrerar inte en äldre installation.** Om `.gitignore` redan har den gamla, breda raden `.codegraph/` från en tidigare version av CodeGraph läggs den nya `.codegraph/kuzu*`-raden ändå till, men den gamla raden tas inte bort — `.codegraph/config.json` förblir då ignorerat och går inte att committa, utan att verktyget säger något.
 - **`main()`-vakten i `mcp-server.ts` avgör om processen ska starta transporten genom att kontrollera att `process.argv[1]` slutar på `"mcp-server.ts"`.** Korrekt så länge `build` är `tsc --noEmit` och filen alltid körs via `tsx` mot källfilen — men bräckligt den dag JS faktiskt emitteras och filen heter `mcp-server.js`, eller bunt(l)as till något annat namn.
@@ -327,10 +339,10 @@ Begränsningar som är konsekvenser av implementationen snarare än designval, o
 |---|---|---|
 | `src/verify-kuzu.ts` | `npm run verify:kuzu` | Att den nativa Kuzu-bindningen laddar och svarar. Körs separat, inte del av `npm test`. |
 | `test/paths-smoke.ts` | `npm run test:paths` | `findGraphDatabase`s uppåtsökning: ingen graf hittas när ingen finns, en rotgraf hittas från en djup underkatalog, en närmare graf vinner över en längre bort, `graphDatabasePathFor` kräver inte att målet existerar, och `searchedDirectories` räknar upp hela kedjan ner till filsystemroten. |
-| `test/seed-smoke.ts` | `npm run test:seed` | Hela seedvägen mot `test/fixtures/imports`: `SeedSummary` jämförs exakt fält för fält (inklusive `unresolvedCalls`), `IMPORTS`-, `DECLARES`- (med `line`/`endLine` och `typeAlias`), `CALLS`- och `unresolvedImports`/`unresolvedMocks`-kanterna verifieras med egna Cypher-frågor. Skapar också en `.generated/ignored.ts` för att bevisa att filtret för dolda rotkataloger fungerar. |
+| `test/seed-smoke.ts` | `npm run test:seed` | Hela seedvägen mot `test/fixtures/imports`: `SeedSummary` jämförs exakt fält för fält (inklusive `externalCalls`/`unresolvedCalls`, och att en arrow-konstant blir en `Function`-nod vars koncisa kropp skannas), `IMPORTS`-, `DECLARES`- (med `line`/`endLine` och `typeAlias`), `CALLS`- och `unresolvedImports`/`unresolvedMocks`-kanterna verifieras med egna Cypher-frågor. Skapar också en `.generated/ignored.ts` för att bevisa att filtret för dolda rotkataloger fungerar. |
 | `test/monorepo-smoke.ts` | `npm run test:monorepo` | Multi-tsconfig-upplösning: seedas bara app-projektet blir en korspaketimport en `unresolvedImports`-räknare; seedas app- och core-projektet tillsammans blir samma import en riktig `IMPORTS`-kant. |
 | `test/graph-meta-smoke.ts` | `npm run test:meta` | Fyra fall för `graph-meta.ts`: `GraphMeta` speglar exakt vad `seedCodebase` skrev; ett riktigt, isolerat gitrepo bevisar att `stale`/`changedFiles` faktiskt reagerar på en okommitterad ändring; en tom `GraphMeta`-tabell och en helt saknad `GraphMeta`-tabell degraderar bägge till `stale: true` med en `reason`, aldrig en krasch eller ett falskt "fräsch". |
-| `test/tools-smoke.ts` | `npm run test:tools` | `findSymbol` och `queryNeighbors` direkt: radintervall i träffar, `unresolved`-fält som skiljer `null` (ej tillämplig) från ett uppmätt tal (inklusive 0), `unknownPaths` för sökvägar som inte matchar någon nod, och att interpolationsvakten faktiskt kastar för en icke-enum-kanttyp, en icke-enum-riktning och ett icke-heltaligt djup. |
+| `test/tools-smoke.ts` | `npm run test:tools` | `findSymbol` och `queryNeighbors` direkt: radintervall i träffar, skiftlägesokänslig matchning, `counts`-fält som skiljer `null` (ej tillämplig) från ett uppmätt tal (inklusive 0) och externa anrop från verkliga missar, `unknownPaths` för sökvägar som inte matchar någon nod, och att interpolationsvakten faktiskt kastar för en icke-enum-kanttyp, en icke-enum-riktning och ett icke-heltaligt djup. |
 | `test/warm-connection-smoke.ts` | `npm run test:warm` | Den varma anslutningen i `withConnection`: en andra fråga återanvänder cachen, en omseedning upptäcks via inode/mtime och nästa fråga ser den nya grafen, och en samtidighetslast (tio parallella anrop som racear en omseedning, två varv) varken kraschar processen eller lämnar kvar en föråldrad graf — varje anrop lyckas eller misslyckas rent med ett fångbart `Error`. |
 | — | `npm test` | Kör `test:paths`, `test:seed`, `test:monorepo`, `test:meta`, `test:tools` och `test:warm` i tur och ordning. |
 | — | `npm run build` | `tsc --noEmit` över `src/` och `test/`. |

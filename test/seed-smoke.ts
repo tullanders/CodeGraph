@@ -15,6 +15,14 @@ await writeFile(path.join(fixtureDirectory, ".generated", "ignored.ts"), "export
 try {
   const summary = await seedCodebase([path.join(fixtureDirectory, "tsconfig.json")], databasePath);
 
+  // externalCalls and unresolvedCalls are deliberately separate counters.
+  // A call into node_modules or the TypeScript lib (useExternal ->
+  // JSON.stringify) is expected and unfixable — a graph of this project can
+  // never contain it. A call we simply failed to resolve (useUnknown ->
+  // target.whatever() through `any`) is the only number that says anything
+  // about graph quality. Summing them into one "unresolved" figure made a
+  // healthy graph look broken, which is exactly how a reader loses trust in
+  // the CALLS edge.
   assert.deepEqual(summary, {
     files: 4,
     imports: 2,
@@ -22,8 +30,9 @@ try {
     mocks: 0,
     unresolvedMocks: 1,
     types: 3,
-    functions: 4,
-    calls: 2,
+    functions: 7,
+    calls: 3,
+    externalCalls: 2,
     unresolvedCalls: 1,
   });
 
@@ -71,20 +80,30 @@ try {
     const functionResult = singleResult(await connection.query(`
       MATCH (fn:Function)
       RETURN fn.name AS name, fn.kind AS kind, fn.line AS line, fn.endLine AS endLine,
-             fn.unresolvedCalls AS unresolvedCalls
+             fn.externalCalls AS externalCalls, fn.unresolvedCalls AS unresolvedCalls
       ORDER BY name, line
     `));
     const functionRows = await functionResult.getAll();
     await functionResult.close();
 
-    // useHelper calls `helper`, which is an arrow-const, not a function
-    // declaration, so ts-morph never tracks it as a Function node and the
-    // call cannot become a CALLS edge — it is counted as unresolved instead.
+    // `helper` is an arrow function bound to a const. It is a Function node
+    // like any other: callable, callers resolvable, and its own body scanned
+    // for calls — `value.trim()` lands in the TypeScript lib, so one external
+    // call. Its concise body IS the call expression, with no block around it,
+    // which the scan must not skip.
+    //
+    // useExternal calls JSON.stringify, declared in the TypeScript lib and
+    // therefore external by definition, not a miss. useUnknown calls through
+    // `any`, where no symbol exists at all — unknowable, so unresolved: the
+    // only genuine gap left in this fixture.
     assert.deepEqual(functionRows, [
-      { name: "formatMessage", kind: "function", line: 5, endLine: 7, unresolvedCalls: 0 },
-      { name: "start", kind: "method", line: 4, endLine: 6, unresolvedCalls: 0 },
-      { name: "start", kind: "function", line: 9, endLine: 11, unresolvedCalls: 0 },
-      { name: "useHelper", kind: "function", line: 7, endLine: 9, unresolvedCalls: 1 },
+      { name: "formatMessage", kind: "function", line: 5, endLine: 7, externalCalls: 0, unresolvedCalls: 0 },
+      { name: "helper", kind: "function", line: 5, endLine: 5, externalCalls: 1, unresolvedCalls: 0 },
+      { name: "start", kind: "method", line: 4, endLine: 6, externalCalls: 0, unresolvedCalls: 0 },
+      { name: "start", kind: "function", line: 9, endLine: 11, externalCalls: 0, unresolvedCalls: 0 },
+      { name: "useExternal", kind: "function", line: 11, endLine: 13, externalCalls: 1, unresolvedCalls: 0 },
+      { name: "useHelper", kind: "function", line: 7, endLine: 9, externalCalls: 0, unresolvedCalls: 0 },
+      { name: "useUnknown", kind: "function", line: 15, endLine: 17, externalCalls: 0, unresolvedCalls: 1 },
     ]);
 
     const callResult = singleResult(await connection.query(`
@@ -98,6 +117,7 @@ try {
     assert.deepEqual(callRows, [
       { callerName: "start", calleeName: "formatMessage" },
       { callerName: "start", calleeName: "formatMessage" },
+      { callerName: "useHelper", calleeName: "helper" },
     ]);
 
     const unresolvedResult = singleResult(await connection.query(`
