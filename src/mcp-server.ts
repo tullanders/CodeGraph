@@ -37,15 +37,40 @@ interface CachedConnection {
 
 let cached: CachedConnection | undefined;
 
+// The MCP SDK dispatches tool calls without awaiting the previous one to
+// finish (see protocol.js's fire-and-forget `Promise.resolve().then(...)`
+// dispatch), so two withConnection calls can be in flight together. Kuzu's
+// close() does not coordinate with an outstanding query, so without
+// serializing, one call detecting a reseed could close the shared connection
+// while another call is still mid-query against it — a closed-handle crash
+// instead of a clean result. Every call queues behind the previous one; a
+// warm query costs ~0.5ms, so serializing costs nothing that matters. The
+// queue tail always advances once a turn settles, fulfilled or rejected, so
+// one failing call can never wedge every later call — but each call still
+// returns (and rejects with) its own outcome, unswallowed.
+let queueTail: Promise<void> = Promise.resolve();
+
+export function withConnection<T>(
+  databasePath: string,
+  run: (connection: Connection) => Promise<T>,
+): Promise<T> {
+  const turn = queueTail.then(() => runWithCachedConnection(databasePath, run));
+  queueTail = turn.then(
+    () => undefined,
+    () => undefined,
+  );
+  return turn;
+}
+
 // Opening a 26 MB Kuzu file costs ~37ms; a stat costs microseconds.
 // Kuzu takes no exclusive lock, so the seeder can write while the server is
 // alive — but an open connection then keeps serving the OLD graph without
 // throwing. Inode and mtime are what reveal that the seeder swapped the file.
-export async function withConnection<T>(
+async function runWithCachedConnection<T>(
   databasePath: string,
   run: (connection: Connection) => Promise<T>,
 ): Promise<T> {
-  const stats = statSync(databasePath);
+  const stats = statDatabaseFile(databasePath);
 
   if (
     cached &&
@@ -61,6 +86,18 @@ export async function withConnection<T>(
   cached = { databasePath, inode: stats.ino, modifiedMs: stats.mtimeMs, database, connection };
 
   return run(connection);
+}
+
+// statSync throws (e.g. ENOENT) when the database file doesn't exist right
+// now — the seeder removes the old file before the new one exists, so a call
+// can land in that window. Surface a Swedish, user-facing message instead of
+// a raw fs error, matching getDatabasePath()'s style above.
+function statDatabaseFile(databasePath: string) {
+  try {
+    return statSync(databasePath);
+  } catch {
+    throw new Error("Grafen seedas om just nu, försök igen om en stund.");
+  }
 }
 
 export async function closeCachedConnection() {
