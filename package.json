@@ -20,7 +20,9 @@
     "test:meta": "tsx test/graph-meta-smoke.ts",
     "test:tools": "tsx test/tools-smoke.ts",
     "test:warm": "tsx test/warm-connection-smoke.ts",
-    "test": "npm run test:paths && npm run test:seed && npm run test:monorepo && npm run test:meta && npm run test:tools && npm run test:warm"
+    "test:old-schema": "tsx test/old-schema-smoke.ts",
+    "test:config": "tsx test/config-smoke.ts",
+    "test": "npm run test:paths && npm run test:seed && npm run test:monorepo && npm run test:meta && npm run test:tools && npm run test:warm && npm run test:old-schema && npm run test:config"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",

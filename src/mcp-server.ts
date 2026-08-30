@@ -156,39 +156,76 @@ async function rows(connection: Connection, statement: string, parameters: Recor
   return all;
 }
 
+// Columns this branch added to the schema (line ranges in 2fa664a, unresolved
+// counters in bd737f9). A Kuzu binder exception naming exactly one of these
+// means the open database predates those migrations — e.g. a graph seeded
+// before this feature existed and never re-seeded — not a genuine bug. Any
+// other binder exception (a typo'd table name, a column that was never part
+// of this list) does not match and is rethrown unchanged, as itself.
+const SCHEMA_ADDITIONS_ON_THIS_BRANCH = new Set([
+  "line",
+  "endLine",
+  "unresolvedImports",
+  "unresolvedMocks",
+  "unresolvedCalls",
+]);
+
+export const STALE_SCHEMA_MESSAGE =
+  "Grafen verkar vara byggd med en äldre version av CodeGraph — kör 'codegraph seed' för att bygga om den.";
+
+// Narrowly discriminates "old-schema database" from a real bug: only a Kuzu
+// binder exception of the exact shape "Cannot find property <X> for ..." where
+// <X> is one of this branch's own added columns is relabelled. Anything else —
+// a different binder exception, a non-Error throw, a property name we don't
+// recognize — is rethrown exactly as received.
+export function rethrowFriendlyIfStaleSchema(error: unknown): never {
+  if (error instanceof Error) {
+    const match = /^Binder exception: Cannot find property (\w+) for /.exec(error.message);
+    if (match && SCHEMA_ADDITIONS_ON_THIS_BRANCH.has(match[1])) {
+      throw new Error(STALE_SCHEMA_MESSAGE);
+    }
+  }
+
+  throw error;
+}
+
 // Searches both name and path across all three node types. File has no
 // name/kind/line and is therefore normalized to fileName and null respectively.
 export async function findSymbol(connection: Connection, query: string): Promise<SymbolMatch[]> {
   const matches: SymbolMatch[] = [];
 
-  const fileRows = await rows(
-    connection,
-    `MATCH (n:File) WHERE n.path CONTAINS $query OR n.fileName CONTAINS $query
-     RETURN n.path AS path, n.fileName AS name ORDER BY path`,
-    { query },
-  );
-  for (const row of fileRows) {
-    matches.push({ nodeType: "File", path: row.path as string, name: row.name as string, kind: "file", line: null, endLine: null });
-  }
-
-  for (const table of ["Type", "Function"] as const) {
-    const nodeRows = await rows(
+  try {
+    const fileRows = await rows(
       connection,
-      `MATCH (n:${table}) WHERE n.path CONTAINS $query OR n.name CONTAINS $query
-       RETURN n.path AS path, n.name AS name, n.kind AS kind, n.line AS line, n.endLine AS endLine
-       ORDER BY path`,
+      `MATCH (n:File) WHERE n.path CONTAINS $query OR n.fileName CONTAINS $query
+       RETURN n.path AS path, n.fileName AS name ORDER BY path`,
       { query },
     );
-    for (const row of nodeRows) {
-      matches.push({
-        nodeType: table,
-        path: row.path as string,
-        name: row.name as string,
-        kind: row.kind as string,
-        line: row.line as number,
-        endLine: row.endLine as number,
-      });
+    for (const row of fileRows) {
+      matches.push({ nodeType: "File", path: row.path as string, name: row.name as string, kind: "file", line: null, endLine: null });
     }
+
+    for (const table of ["Type", "Function"] as const) {
+      const nodeRows = await rows(
+        connection,
+        `MATCH (n:${table}) WHERE n.path CONTAINS $query OR n.name CONTAINS $query
+         RETURN n.path AS path, n.name AS name, n.kind AS kind, n.line AS line, n.endLine AS endLine
+         ORDER BY path`,
+        { query },
+      );
+      for (const row of nodeRows) {
+        matches.push({
+          nodeType: table,
+          path: row.path as string,
+          name: row.name as string,
+          kind: row.kind as string,
+          line: row.line as number,
+          endLine: row.endLine as number,
+        });
+      }
+    }
+  } catch (error) {
+    rethrowFriendlyIfStaleSchema(error);
   }
 
   return matches;
@@ -225,6 +262,14 @@ function normalizeDepth(depth: number): number {
 // EDGE_TYPES/DIRECTIONS and Zod enums in the tool schema below — never from a
 // free string field. The path list is bound as a parameter.
 export async function queryNeighbors(connection: Connection, query: NeighborQuery): Promise<NeighborResult> {
+  try {
+    return await queryNeighborsUnguarded(connection, query);
+  } catch (error) {
+    rethrowFriendlyIfStaleSchema(error);
+  }
+}
+
+async function queryNeighborsUnguarded(connection: Connection, query: NeighborQuery): Promise<NeighborResult> {
   const seen = new Map<string, SymbolMatch>();
   const depth = normalizeDepth(query.depth);
 
@@ -415,12 +460,13 @@ server.registerTool(
       "Returnerar grafens färskhet: när den seedades, mot vilken commit, vilka tsconfig som ingick, hur många TypeScript-filer som ändrats sedan dess, och var databasen ligger. Anropa detta innan du litar på ett radintervall från grafen.",
     inputSchema: {},
   },
-  async () =>
-    withConnection(getDatabasePath(), async (connection) => {
-      const databasePath = getDatabasePath();
+  async () => {
+    const databasePath = getDatabasePath();
+    return withConnection(databasePath, async (connection) => {
       const report = await describeFreshness(connection, databasePath, path.dirname(path.dirname(databasePath)));
       return textResult(JSON.stringify(report, null, 2));
-    }),
+    });
+  },
 );
 
 async function main() {
