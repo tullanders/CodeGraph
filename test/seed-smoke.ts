@@ -13,18 +13,18 @@ await mkdir(path.join(fixtureDirectory, ".generated"), { recursive: true });
 await writeFile(path.join(fixtureDirectory, ".generated", "ignored.ts"), "export const ignored = true;\n");
 
 try {
-  const summary = await seedCodebase(path.join(fixtureDirectory, "tsconfig.json"), databasePath);
+  const summary = await seedCodebase([path.join(fixtureDirectory, "tsconfig.json")], databasePath);
 
   assert.deepEqual(summary, {
-    files: 3,
+    files: 4,
     imports: 2,
     unresolvedImports: 1,
     mocks: 0,
-    unresolvedMocks: 0,
-    types: 2,
-    functions: 3,
+    unresolvedMocks: 1,
+    types: 3,
+    functions: 4,
     calls: 2,
-    unresolvedCalls: 0,
+    unresolvedCalls: 1,
   });
 
   const { database, connection } = openGraphDatabase(databasePath);
@@ -55,15 +55,36 @@ try {
 
     const typeResult = singleResult(await connection.query(`
       MATCH (file:File)-[:DECLARES]->(type:Type)
-      RETURN file.fileName AS fileName, type.name AS name, type.kind AS kind
+      RETURN file.fileName AS fileName, type.name AS name, type.kind AS kind,
+             type.line AS line, type.endLine AS endLine
       ORDER BY fileName, name
     `));
     const typeRows = await typeResult.getAll();
     await typeResult.close();
 
     assert.deepEqual(typeRows, [
-      { fileName: "app.ts", name: "Application", kind: "class" },
-      { fileName: "format.ts", name: "Formatter", kind: "interface" },
+      { fileName: "app.ts", name: "Application", kind: "class", line: 3, endLine: 7 },
+      { fileName: "format.ts", name: "Formatter", kind: "interface", line: 1, endLine: 3 },
+      { fileName: "format.ts", name: "FormatterOptions", kind: "typeAlias", line: 9, endLine: 11 },
+    ]);
+
+    const functionResult = singleResult(await connection.query(`
+      MATCH (fn:Function)
+      RETURN fn.name AS name, fn.kind AS kind, fn.line AS line, fn.endLine AS endLine,
+             fn.unresolvedCalls AS unresolvedCalls
+      ORDER BY name, line
+    `));
+    const functionRows = await functionResult.getAll();
+    await functionResult.close();
+
+    // useHelper calls `helper`, which is an arrow-const, not a function
+    // declaration, so ts-morph never tracks it as a Function node and the
+    // call cannot become a CALLS edge — it is counted as unresolved instead.
+    assert.deepEqual(functionRows, [
+      { name: "formatMessage", kind: "function", line: 5, endLine: 7, unresolvedCalls: 0 },
+      { name: "start", kind: "method", line: 4, endLine: 6, unresolvedCalls: 0 },
+      { name: "start", kind: "function", line: 9, endLine: 11, unresolvedCalls: 0 },
+      { name: "useHelper", kind: "function", line: 7, endLine: 9, unresolvedCalls: 1 },
     ]);
 
     const callResult = singleResult(await connection.query(`
@@ -77,6 +98,25 @@ try {
     assert.deepEqual(callRows, [
       { callerName: "start", calleeName: "formatMessage" },
       { callerName: "start", calleeName: "formatMessage" },
+    ]);
+
+    const unresolvedResult = singleResult(await connection.query(`
+      MATCH (file:File)
+      RETURN file.fileName AS fileName,
+             file.unresolvedImports AS unresolvedImports,
+             file.unresolvedMocks AS unresolvedMocks
+      ORDER BY fileName
+    `));
+    const unresolvedRows = await unresolvedResult.getAll();
+    await unresolvedResult.close();
+
+    // index.ts imports node:path, which lies outside the project.
+    // unresolved.ts mocks a package that isn't installed anywhere in the fixture.
+    assert.deepEqual(unresolvedRows, [
+      { fileName: "app.ts", unresolvedImports: 0, unresolvedMocks: 0 },
+      { fileName: "format.ts", unresolvedImports: 0, unresolvedMocks: 0 },
+      { fileName: "index.ts", unresolvedImports: 1, unresolvedMocks: 0 },
+      { fileName: "unresolved.ts", unresolvedImports: 0, unresolvedMocks: 1 },
     ]);
   } finally {
     await closeGraphDatabase(database, connection);

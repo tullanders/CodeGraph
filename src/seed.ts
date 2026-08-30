@@ -1,12 +1,8 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { FunctionDeclaration, MethodDeclaration, Project, SyntaxKind, ts } from "ts-morph";
-import {
-  closeGraphDatabase,
-  createGraphDatabase,
-  DEFAULT_DATABASE_PATH,
-  singleResult,
-} from "./schema.js";
+import { FunctionDeclaration, MethodDeclaration, Project, SourceFile, SyntaxKind, ts } from "ts-morph";
+import { currentCommit, writeGraphMeta } from "./graph-meta.js";
+import { closeGraphDatabase, createGraphDatabase, singleResult } from "./schema.js";
 
 export interface SeedSummary {
   files: number;
@@ -24,26 +20,70 @@ const MOCK_FUNCTION_NAMES = new Set(["mock", "doMock"]);
 const MOCK_OBJECT_NAMES = new Set(["vi", "jest"]);
 
 export async function seedCodebase(
-  tsconfigPath: string,
-  databasePath?: string,
+  tsconfigPaths: string[],
+  databasePath: string,
 ): Promise<SeedSummary> {
-  const resolvedTsconfigPath = path.resolve(tsconfigPath);
-  const resolvedDatabasePath = path.resolve(
-    databasePath ?? path.join(path.dirname(resolvedTsconfigPath), ".codegraph/kuzu"),
-  );
-  const project = new Project({ tsConfigFilePath: resolvedTsconfigPath });
-  const projectRoot = path.dirname(resolvedTsconfigPath);
-  const sourceFiles = project
-    .getSourceFiles()
-    .filter((sourceFile) => !isInHiddenRootDirectory(sourceFile.getFilePath(), projectRoot));
-  const projectFilePaths = new Set(sourceFiles.map((sourceFile) => sourceFile.getFilePath()));
+  if (tsconfigPaths.length === 0) {
+    throw new Error("Minst en tsconfig.json måste anges.");
+  }
+
+  const resolvedDatabasePath = path.resolve(databasePath);
+  const projects = tsconfigPaths.map((tsconfigPath) => {
+    const resolvedTsconfigPath = path.resolve(tsconfigPath);
+    return {
+      project: new Project({ tsConfigFilePath: resolvedTsconfigPath }),
+      projectRoot: path.dirname(resolvedTsconfigPath),
+    };
+  });
+
+  // A file can be part of several projects. Deduplicate by path so that
+  // every file is visited exactly once, otherwise its imports and functions
+  // would be double-counted.
+  const sourceFileByPath = new Map<string, SourceFile>();
+
+  for (const { project, projectRoot } of projects) {
+    for (const sourceFile of project.getSourceFiles()) {
+      const filePath = sourceFile.getFilePath();
+
+      if (isInHiddenRootDirectory(filePath, projectRoot)) {
+        continue;
+      }
+
+      if (!sourceFileByPath.has(filePath)) {
+        sourceFileByPath.set(filePath, sourceFile);
+      }
+    }
+  }
+
+  const sourceFiles = [...sourceFileByPath.values()];
+  // The union across all projects. Resolving imports against this set — and
+  // not against one project at a time — is the whole point: it's how an
+  // import from apps/web to packages/core becomes an edge instead of an
+  // unresolved counter.
+  const projectFilePaths = new Set(sourceFileByPath.keys());
+
+  // Each file must be resolved with its own project's compiler options.
+  const projectByFilePath = new Map<string, (typeof projects)[number]["project"]>();
+
+  for (const { project } of projects) {
+    for (const sourceFile of project.getSourceFiles()) {
+      const filePath = sourceFile.getFilePath();
+
+      if (!projectByFilePath.has(filePath)) {
+        projectByFilePath.set(filePath, project);
+      }
+    }
+  }
 
   await rm(resolvedDatabasePath, { force: true, recursive: true });
+  await rm(`${resolvedDatabasePath}.wal`, { force: true });
 
   const { database, connection } = await createGraphDatabase(resolvedDatabasePath);
 
   try {
-    const insertFile = await connection.prepare("MERGE (file:File {path: $path, fileName: $fileName})");
+    const insertFile = await connection.prepare(
+      "MERGE (file:File {path: $path, fileName: $fileName, unresolvedImports: 0, unresolvedMocks: 0})",
+    );
     const insertImport = await connection.prepare(`
       MATCH (source:File {path: $sourcePath}), (target:File {path: $targetPath})
       MERGE (source)-[:IMPORTS]->(target)
@@ -54,28 +94,43 @@ export async function seedCodebase(
     `);
     const insertType = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (type:Type {path: $typePath, name: $name, kind: $kind})
+      MERGE (type:Type {path: $typePath, name: $name, kind: $kind, line: $line, endLine: $endLine})
       MERGE (file)-[:DECLARES]->(type)
     `);
     const insertFunction = await connection.prepare(`
       MATCH (file:File {path: $filePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
       MERGE (file)-[:HAS_FUNCTION]->(fn)
     `);
     const insertMethod = await connection.prepare(`
       MATCH (type:Type {path: $typePath})
-      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind})
+      MERGE (fn:Function {path: $fnPath, name: $name, kind: $kind, line: $line, endLine: $endLine, unresolvedCalls: 0})
       MERGE (type)-[:HAS_METHOD]->(fn)
     `);
     const insertCall = await connection.prepare(`
       MATCH (caller:Function {path: $callerPath}), (callee:Function {path: $calleePath})
       MERGE (caller)-[:CALLS]->(callee)
     `);
+    const setFileUnresolved = await connection.prepare(`
+      MATCH (file:File {path: $path})
+      SET file.unresolvedImports = $unresolvedImports, file.unresolvedMocks = $unresolvedMocks
+    `);
+    const setFunctionUnresolved = await connection.prepare(`
+      MATCH (fn:Function {path: $path})
+      SET fn.unresolvedCalls = $unresolvedCalls
+    `);
 
     for (const sourceFile of sourceFiles) {
       const result = singleResult(await connection.execute(insertFile, { path: sourceFile.getFilePath(), fileName: sourceFile.getBaseName() }));
       await result.close();
     }
+
+    // Per node, not just in aggregate: the query layer must be able to say "this
+    // file has 2 unresolved imports" so a genuinely empty list can be told apart
+    // from one that could not be built.
+    const unresolvedImportsByFile = new Map<string, number>();
+    const unresolvedMocksByFile = new Map<string, number>();
+    const unresolvedCallsByFunction = new Map<string, number>();
 
     let imports = 0;
     let unresolvedImports = 0;
@@ -85,6 +140,8 @@ export async function seedCodebase(
         const targetFile = declaration.getModuleSpecifierSourceFile();
 
         if (!targetFile || !projectFilePaths.has(targetFile.getFilePath())) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedImportsByFile.set(filePath, (unresolvedImportsByFile.get(filePath) ?? 0) + 1);
           unresolvedImports += 1;
           continue;
         }
@@ -100,8 +157,6 @@ export async function seedCodebase(
 
     let mocks = 0;
     let unresolvedMocks = 0;
-    const compilerOptions = project.getCompilerOptions();
-    const moduleResolutionHost = project.getModuleResolutionHost();
 
     for (const sourceFile of sourceFiles) {
       for (const callExpression of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -111,17 +166,28 @@ export async function seedCodebase(
           continue;
         }
 
+        const owningProject = projectByFilePath.get(sourceFile.getFilePath());
+
+        if (!owningProject) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedMocksByFile.set(filePath, (unresolvedMocksByFile.get(filePath) ?? 0) + 1);
+          unresolvedMocks += 1;
+          continue;
+        }
+
         const resolution = ts.resolveModuleName(
           moduleSpecifier,
           sourceFile.getFilePath(),
-          compilerOptions,
-          moduleResolutionHost,
+          owningProject.getCompilerOptions(),
+          owningProject.getModuleResolutionHost(),
         );
         const resolvedPath = resolution.resolvedModule
-          ? project.getSourceFile(resolution.resolvedModule.resolvedFileName)?.getFilePath()
+          ? owningProject.getSourceFile(resolution.resolvedModule.resolvedFileName)?.getFilePath()
           : undefined;
 
         if (!resolvedPath || !projectFilePaths.has(resolvedPath)) {
+          const filePath = sourceFile.getFilePath();
+          unresolvedMocksByFile.set(filePath, (unresolvedMocksByFile.get(filePath) ?? 0) + 1);
           unresolvedMocks += 1;
           continue;
         }
@@ -140,11 +206,12 @@ export async function seedCodebase(
     for (const sourceFile of sourceFiles) {
       const filePath = sourceFile.getFilePath();
       const declarations = [
-        ...sourceFile.getClasses().map((declaration) => ({ name: declaration.getName(), kind: "class" })),
-        ...sourceFile.getInterfaces().map((declaration) => ({ name: declaration.getName(), kind: "interface" })),
+        ...sourceFile.getClasses().map((declaration) => ({ declaration, name: declaration.getName(), kind: "class" })),
+        ...sourceFile.getInterfaces().map((declaration) => ({ declaration, name: declaration.getName(), kind: "interface" })),
+        ...sourceFile.getTypeAliases().map((declaration) => ({ declaration, name: declaration.getName(), kind: "typeAlias" })),
       ];
 
-      for (const { name, kind } of declarations) {
+      for (const { declaration, name, kind } of declarations) {
         if (!name) {
           continue;
         }
@@ -154,6 +221,8 @@ export async function seedCodebase(
           typePath: `${filePath}:${name}`,
           name,
           kind,
+          line: declaration.getStartLineNumber(),
+          endLine: declaration.getEndLineNumber(),
         }));
         await result.close();
         types += 1;
@@ -180,6 +249,8 @@ export async function seedCodebase(
           fnPath,
           name,
           kind: "function",
+          line: declaration.getStartLineNumber(),
+          endLine: declaration.getEndLineNumber(),
         }));
         await result.close();
         functionPathByDeclaration.set(declaration, fnPath);
@@ -203,6 +274,8 @@ export async function seedCodebase(
             fnPath,
             name,
             kind: "method",
+            line: method.getStartLineNumber(),
+            endLine: method.getEndLineNumber(),
           }));
           await result.close();
           functionPathByDeclaration.set(method, fnPath);
@@ -230,6 +303,7 @@ export async function seedCodebase(
         ) : undefined;
 
         if (!calleePath) {
+          unresolvedCallsByFunction.set(callerPath, (unresolvedCallsByFunction.get(callerPath) ?? 0) + 1);
           unresolvedCalls += 1;
           continue;
         }
@@ -240,7 +314,25 @@ export async function seedCodebase(
       }
     }
 
-    return {
+    for (const sourceFile of sourceFiles) {
+      const filePath = sourceFile.getFilePath();
+      const result = singleResult(await connection.execute(setFileUnresolved, {
+        path: filePath,
+        unresolvedImports: unresolvedImportsByFile.get(filePath) ?? 0,
+        unresolvedMocks: unresolvedMocksByFile.get(filePath) ?? 0,
+      }));
+      await result.close();
+    }
+
+    for (const functionPath of functionPathByDeclaration.values()) {
+      const result = singleResult(await connection.execute(setFunctionUnresolved, {
+        path: functionPath,
+        unresolvedCalls: unresolvedCallsByFunction.get(functionPath) ?? 0,
+      }));
+      await result.close();
+    }
+
+    const summary: SeedSummary = {
       files: sourceFiles.length,
       imports,
       unresolvedImports,
@@ -251,6 +343,15 @@ export async function seedCodebase(
       calls,
       unresolvedCalls,
     };
+
+    await writeGraphMeta(connection, {
+      seededAt: new Date().toISOString(),
+      commit: await currentCommit(path.dirname(resolvedDatabasePath)),
+      tsconfigs: tsconfigPaths.map((entry) => path.resolve(entry)),
+      counts: summary,
+    });
+
+    return summary;
   } finally {
     await closeGraphDatabase(database, connection);
   }
@@ -287,30 +388,4 @@ function isInHiddenRootDirectory(filePath: string, projectRoot: string) {
   const [rootDirectory] = path.relative(projectRoot, filePath).split(path.sep);
 
   return rootDirectory.startsWith(".");
-}
-
-function getTsconfigPath(argumentsList: string[]) {
-  const optionIndex = argumentsList.indexOf("--tsconfig");
-
-  if (optionIndex === -1 || !argumentsList[optionIndex + 1]) {
-    throw new Error("Missing --tsconfig <path>.");
-  }
-
-  return argumentsList[optionIndex + 1];
-}
-
-async function main() {
-  const tsconfigPath = getTsconfigPath(process.argv.slice(2));
-  const summary = await seedCodebase(tsconfigPath);
-
-  console.log(
-    `Seeded ${summary.files} files, ${summary.types} types, ${summary.functions} functions, and ${summary.imports} imports (${summary.unresolvedImports} unresolved imports). ${summary.calls} calls resolved (${summary.unresolvedCalls} unresolved calls). ${summary.mocks} mocks resolved (${summary.unresolvedMocks} unresolved mocks).`,
-  );
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
-  main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  });
 }

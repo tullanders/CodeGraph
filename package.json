@@ -12,10 +12,17 @@
   "scripts": {
     "verify:kuzu": "tsx src/verify-kuzu.ts",
     "build": "tsc --noEmit",
-    "seed": "tsx src/seed.ts",
     "explorer": "docker run --rm -p 8000:8000 -v \"$PWD/.codegraph/kuzu:/database/database.kz\" kuzudb/explorer:latest",
     "mcp": "tsx src/mcp-server.ts",
-    "test:seed": "tsx test/seed-smoke.ts"
+    "test:seed": "tsx test/seed-smoke.ts",
+    "test:paths": "tsx test/paths-smoke.ts",
+    "test:monorepo": "tsx test/monorepo-smoke.ts",
+    "test:meta": "tsx test/graph-meta-smoke.ts",
+    "test:tools": "tsx test/tools-smoke.ts",
+    "test:warm": "tsx test/warm-connection-smoke.ts",
+    "test:old-schema": "tsx test/old-schema-smoke.ts",
+    "test:config": "tsx test/config-smoke.ts",
+    "test": "npm run test:paths && npm run test:seed && npm run test:monorepo && npm run test:meta && npm run test:tools && npm run test:warm && npm run test:old-schema && npm run test:config"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",

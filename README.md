@@ -1,6 +1,6 @@
 # CodeGraph PoC
 
-En lokal TypeScript-kodgraf som seedas fran `tsconfig.json` med `ts-morph`, lagras i Kuzu och gors tillganglig for en kodagent via en MCP-server over stdio.
+En lokal TypeScript-kodgraf som seedas fran en eller flera `tsconfig.json` med `ts-morph`, lagras i Kuzu och gors tillganglig for en kodagent via en MCP-server over stdio.
 
 ## Kom igang
 
@@ -37,7 +37,15 @@ cd /sokvag/till/projektet
 codegraph init
 ```
 
-Kommandot hittar `tsconfig.json` i aktuell katalog, skapar `.codegraph/kuzu`, lagger till `.codegraph/` i `.gitignore`, och skapar eller uppdaterar projektets `.mcp.json` med MCP-serverns korrekta sokvagar. Kor `codegraph seed` fran samma katalog nar koden andras.
+Kommandot hittar `tsconfig.json` i aktuell katalog, skapar `.codegraph/kuzu`, lagger till `.codegraph/kuzu*` i `.gitignore`, skriver projektets tsconfig-sokvagar till `.codegraph/config.json`, och skapar eller uppdaterar projektets `.mcp.json` med MCP-serverns korrekta sokvagar. Kor `codegraph seed` fran samma katalog nar koden andras.
+
+For ett monorepo med flera tsconfig, ange varje sokvag med en upprepad `--tsconfig`-flagga:
+
+```bash
+codegraph init --tsconfig tsconfig.json --tsconfig packages/pdf/tsconfig.json
+```
+
+Sokvagarna sparas relativt projektets rot i `.codegraph/config.json`, sa filen kan checkas in och delas med teamet. `codegraph seed` utan flaggor laser om samma lista fran `.codegraph/config.json`; ange `--tsconfig` igen om listan ska andras.
 
 Lagg till servern i din MCP-klient, till exempel:
 
@@ -77,14 +85,13 @@ claude mcp list
 claude mcp get codegraph
 ```
 
-Servern exponerar fyra skrivskyddade verktyg:
+Servern exponerar tre skrivskyddade verktyg:
 
-- `get_file_dependencies`: filer som en given fil importerar direkt.
-- `get_file_importers`: filer som direkt importerar en given fil.
-- `get_file_mocks`: moduler som en given fil mockar (`vi.mock`/`jest.mock`).
-- `get_file_mocked_by`: filer som mockar en given fil (`vi.mock`/`jest.mock`).
+- `graph_status`: när grafen seedades, mot vilken commit, vilka tsconfig som ingick, och hur många TypeScript-filer som ändrats sedan dess. Anropa detta innan du litar på ett radintervall.
+- `find_symbol`: hittar filer, typer och funktioner på namn eller sökvägsdel, och returnerar radintervall.
+- `neighbors`: expanderar noder längs `IMPORTS`, `MOCKS`, `CALLS`, `DECLARES`, `HAS_FUNCTION` eller `HAS_METHOD`, i valfri riktning och till djup 1–3.
 
-Alla fyra tar `{ "pathQuery": "del/av/sokvag" }` och returnerar kandidater i stallet for ett godtyckligt val om flera filer matchar.
+Varje `neighbors`-svar bär `unresolved`-räknare. En tom nodlista med `unresolved > 0` betyder att grafen inte kunde upplösa relationen — inte att den saknas.
 
 ## Forutsattningar
 
